@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SFTP Client Interface</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        h1 {
+            color: #0056b3;
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        input[type="text"], input[type="file"] {
+            padding: 10px;
+            margin-right: 10px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            width: 300px;
+        }
+        button {
+            background-color: #0056b3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #004494;
+        }
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+        li {
+            background-color: #fff;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 5px;
+        }
+        form.inline {
+            display: inline;
+        }
+        .loader {
+            border: 16px solid #f3f3f3; /* Light grey */
+            border-top: 16px solid #3498db; /* Blue */
+            border-radius: 50%;
+            width: 120px;
+            height: 120px;
+            animation: spin 2s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>SFTP File Browser</h1>
+    <form action="/change-directory" method="POST">
+        <label for="path">Enter Path:</label>
+        <input type="text" id="path" name="path" value="<%= currentPath %>">
+        <button type="submit">Go</button>
+    </form>
+
+    <!-- Loading Indicator -->
+    <div id="loading" style="display: none;">
+        <h2>File is being prepared for download...</h2>
+        <div class="loader"></div>
+    </div>
+
+    <ul>
+        <% files.forEach(function(file) { %>
+            <li>
+                <%= file.name %> - <%= file.type %>
+                <% if (file.type === 'directory') { %>
+                    <form action="/open-directory" method="POST" class="inline">
+                        <input type="hidden" name="path" value="<%= file.path %>">
+                        <button type="submit">Open</button>
+                    </form>
+                    <form action="/download" method="POST" class="inline">
+                        <input type="hidden" name="path" value="<%= file.path %>">
+                        <button type="submit">Download</button>
+                    </form>
+                <% } else { %>
+                    <form action="/download" method="POST" class="inline">
+                        <input type="hidden" name="path" value="<%= file.path %>">
+                        <button type="submit">Download</button>
+                    </form>
+                <% } %>
+            </li>
+        <% }); %>
+    </ul>
+
+    <form action="/upload" method="POST" enctype="multipart/form-data">
+        <input type="file" name="fileToUpload">
+        <input type="hidden" name="destination" value="<%= currentPath %>">
+        <button type="submit">Upload</button>
+    </form>
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const downloadForms = document.querySelectorAll('form[action="/download"]');
+            downloadForms.forEach(form => {
+                form.addEventListener('submit', function(event) {
+                    document.getElementById('loading').style.display = 'block'; // Show loading indicator
+                    
+                    // Set a timeout to hide the loading indicator assuming the download has started
+                    setTimeout(() => {
+                        if (document.visibilityState === 'visible') {
+                            document.getElementById('loading').style.display = 'none';
+                        }
+                    }, 5000); // Adjust the timeout as needed
+                });
+            });
+        });
+        </script>
+</body>
+</html>
