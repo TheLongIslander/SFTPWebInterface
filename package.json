@@ -1,0 +1,18 @@
+{
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "concat-stream": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "ejs": "^3.1.10",
+    "express": "^4.19.2",
+    "express-fileupload": "^1.5.0",
+    "jszip": "^3.10.1",
+    "pipeline": "^0.1.3",
+    "promisify": "^0.0.3",
+    "sftp-client": "^0.0.1",
+    "ssh2": "^1.15.0",
+    "stream": "^0.0.2",
+    "tempy": "^3.1.0",
+    "util": "^0.12.5"
+  }
+}
