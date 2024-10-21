@@ -176,6 +176,21 @@ li {
 .upload-section button:hover {
     background-color: #ff1493; /* Darker pink on hover */
 }
+.image-preview {
+    width: 100px;
+    height: 100px;
+    object-fit: cover;
+    margin-right: 10px;
+    border-radius: 20px; /* Add rounded corners for image previews */
+}
+
+.video-thumbnail {
+    width: 150px;
+    height: 100px;
+    object-fit: cover;
+    margin-right: 10px;
+    border-radius: 20px; /* Add rounded corners for video previews */
+}
 
 /* Specific styles for the Go button */
 #go-button {
