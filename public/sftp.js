@@ -77,7 +77,7 @@ function fetchFiles(path) {
 
     if (!token) {
         alert('You are not authenticated.');
-        window.location.href = '/';
+        window.location.href = '/lovely';
         return;
     }
 
@@ -130,8 +130,13 @@ function fetchFiles(path) {
                     } else {
                         const fileName = document.createElement('span');
                         fileName.textContent = file.name;
-
-                        if (file.name.endsWith('.jar')) {
+                        // Check for image or video and create a preview
+                        if (isImage(file.name)) {
+                            fileIcon = createImagePreview(file, path); // Create image preview
+                        } else if (isVideo(file.name)) {
+                            fileIcon = createVideoPreview(file, path); // Create video preview
+                        }
+                        else if (file.name.endsWith('.jar')) {
                             fileIcon = document.createElement('img');
                             fileIcon.src = '/lovely/assets/jar.png';  // Updated path
                             fileIcon.alt = 'JAR File';
@@ -452,4 +457,55 @@ function generateUniqueId() {
 
 function goToRoot() {
     fetchFiles('/');
+}
+
+function isImage(filename) {
+    return /\.(jpg|jpeg|png|gif|bmp|webp|heic)$/i.test(filename);
+}
+
+
+function isVideo(filename) {
+    return /\.(mp4|mov|avi|webm|mkv)$/i.test(filename);
+}
+
+
+function createImagePreview(file, path) {
+    const imageElement = document.createElement('img');
+    const filePath = `${path}/${file.name}`;
+
+    fetch(`/lovely/download-preview?path=${encodeURIComponent(filePath)}`, {
+        headers: {
+            'Authorization': 'Bearer ' + localStorage.getItem('token')
+        }
+    })
+        .then(response => response.blob())
+        .then(blob => {
+            const url = URL.createObjectURL(blob);
+            imageElement.src = url; // Set preview URL
+            imageElement.classList.add('image-preview'); // Add some CSS class for styling
+            imageElement.alt = file.name;
+        })
+        .catch(err => console.error('Error fetching image preview:', err));
+
+    return imageElement;
+}
+function createVideoPreview(file, path) {
+    const videoThumbnail = document.createElement('img'); // Use an image element for the video thumbnail
+    const filePath = `${path}/${file.name}`;
+
+    fetch(`/lovely/download-preview?path=${encodeURIComponent(filePath)}`, {
+        headers: {
+            'Authorization': 'Bearer ' + localStorage.getItem('token')
+        }
+    })
+        .then(response => response.blob())
+        .then(blob => {
+            const url = URL.createObjectURL(blob);
+            videoThumbnail.src = url; // Set the thumbnail image URL
+            videoThumbnail.classList.add('video-thumbnail'); // Add a class for custom styling
+            videoThumbnail.alt = `Thumbnail for ${file.name}`;
+        })
+        .catch(err => console.error('Error fetching video thumbnail:', err));
+
+    return videoThumbnail;
 }
