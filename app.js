@@ -18,6 +18,9 @@ const { pipeline } = require('stream/promises');
 const { join } = require('path');
 const fileUpload = require('express-fileupload');
 const unzipper = require('unzipper');
+const heicConvert = require('heic-convert');
+const { readdir } = require('fs/promises');
+const sharp = require('sharp');  // For image resizing
 let wss;
 
 const { getEasternTime, getFormattedDate, getEasternDateHour, cleanupExpiredTokens, logServerAction, logSFTPServerAction } = require('./utils');  // Adjust the path as necessary based on your file structure
@@ -44,7 +47,9 @@ const sftpConnectionDetails = {
   host: process.env.SFTP_HOST,
   port: process.env.SFTP_PORT,
   username: process.env.SFTP_USERNAME,
-  password: process.env.SFTP_PASSWORD
+  password: process.env.SFTP_PASSWORD,
+  readyTimeout: 600000,  // 10 minutes (600000 ms)
+  keepaliveInterval: 10000
 };
 const authenticateJWT = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -84,8 +89,17 @@ const db = new sqlite3.Database('./token_blacklist.db', sqlite3.OPEN_READWRITE |
   });
 });
 
-const sftpStat = promisify((sftp, path, callback) => sftp.stat(path, callback));
-const sftpReadStream = (sftp, remotePath) => sftp.createReadStream(remotePath);
+const sftpStat = (sftp, filePath) => {
+  return new Promise((resolve, reject) => {
+      sftp.stat(filePath, (err, stats) => {
+          if (err) reject(err);
+          else resolve(stats);
+      });
+  });
+};
+const sftpReadStream = (sftp, filePath) => {
+  return sftp.createReadStream(filePath);
+};
 
 app.get('/lovely/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
@@ -202,7 +216,7 @@ app.post('/lovely/open-directory', authenticateJWT, (req, res) => {
   res.json({ path: currentPath });
 });
 
-// Download route
+
 app.post('/lovely/download', (req, res) => {
   const token = req.body.token;
   const filePath = req.body.path;
@@ -210,69 +224,86 @@ app.post('/lovely/download', (req, res) => {
   const localPath = path.join(os.tmpdir(), filename); // Local path to save directory
 
   jwt.verify(token, process.env.JWT_SECRET, async (err, user) => {
-      if (err) {
-          return res.sendStatus(403);
-      }
+    if (err) {
+      return res.sendStatus(403);
+    }
 
-      const conn = new Client();
-      conn.on('ready', () => {
-          conn.sftp(async (err, sftp) => {
+    const conn = new Client();
+    conn.on('ready', () => {
+      conn.sftp(async (err, sftp) => {
+        if (err) {
+          console.error('SFTP connection error:', err);
+          return res.status(500).send('SFTP connection error: ' + err.message);
+        }
+
+        try {
+          const stats = await sftpStat(sftp, filePath);
+
+          if (stats.isDirectory()) {
+            // Reintroduce directory download logic
+            await downloadDirectory(sftp, filePath, localPath); // Recursively download directory
+            const zipPath = await zipDirectory(localPath, filename);
+
+            // Send the zipped directory
+            res.download(zipPath, `${filename}.zip`, (err) => {
               if (err) {
-                  console.error('SFTP connection error:', err);
-                  return res.status(500).send('SFTP connection error: ' + err.message);
+                console.error('Error sending the zip file:', err);
+                return;
+              }
+              // Clean up after sending the file
+              exec(`rm -rf "${localPath}" "${zipPath}"`);
+            });
+          } else {
+            // Handle individual file download (same as before)
+            await new Promise((resolve, reject) => {
+              sftp.fastGet(filePath, localPath, (err) => {
+                if (err) reject(err);
+                else resolve();
+              });
+            });
+
+            const mtime = stats.mtime;
+            const atime = stats.atime || new Date();
+
+            await fsPromises.utimes(localPath, atime, mtime);
+
+            const zipPath = `${localPath}.zip`;
+            exec(`zip -j "${zipPath}" "${localPath}"`, (err) => {
+              if (err) {
+                console.error('Error zipping file:', err);
+                return res.status(500).send('Error zipping file');
               }
 
-              try {
-                  const stats = await sftpStat(sftp, filePath);
-                  
-                  if (stats.isDirectory()) {
-                      await downloadDirectory(sftp, filePath, localPath); // Recursively download directory
-                      const zipPath = await zipDirectory(localPath, filename);
-                      
-                      res.download(zipPath, `${filename}.zip`, (err) => {
-                          if (err) {
-                              console.error('Error sending the zip file:', err);
-                              return; // Stop any further execution
-                          }
-                          // Log the download activity after sending the zip file
-                          const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-                          logSFTPServerAction(user.username, 'download', filePath, ipAddress);
-                          // Cleanup local files after sending
-                          exec(`rm -rf "${localPath}" "${zipPath}"`);
-                      });
-                  } else {
-                      // Handle single file download
-                      res.cookie('fileDownload', 'true', { path: '/', httpOnly: true });
-                      res.attachment(filename);
-                      const fileStream = sftpReadStream(sftp, filePath);
-                      
-                      // Ensure the stream is piped correctly and errors are caught
-                      await pipeline(fileStream, res).catch((err) => {
-                          console.error('Pipeline error:', err);
-                          res.status(500).send('Error streaming file');
-                      });
-
-                      // Log the download activity
-                      const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-                      logSFTPServerAction(user.username, 'download', filePath, ipAddress);
-                  }
-              } catch (error) {
-                  console.error('Failed to process download:', error);
-                  if (!res.headersSent) {
-                      res.status(500).send('Failed to process download: ' + error.message);
-                  }
-              } finally {
-                  conn.end();
-              }
-          });
-      }).connect({
-          host: process.env.SFTP_HOST,
-          port: process.env.SFTP_PORT,
-          username: process.env.SFTP_USERNAME,
-          password: process.env.SFTP_PASSWORD
+              res.download(zipPath, `${filename}.zip`, (err) => {
+                if (err) {
+                  console.error('Error sending the zip file:', err);
+                  return;
+                }
+                exec(`rm -rf "${localPath}" "${zipPath}"`);
+              });
+            });
+          }
+        } catch (error) {
+          console.error('Failed to process download:', error);
+          if (!res.headersSent) {
+            res.status(500).send('Failed to process download: ' + error.message);
+          }
+        } finally {
+          conn.end();
+        }
       });
+    }).connect({
+      host: process.env.SFTP_HOST,
+      port: process.env.SFTP_PORT,
+      username: process.env.SFTP_USERNAME,
+      password: process.env.SFTP_PASSWORD
+    });
   });
 });
+
+
+
+
 
 const zipDirectory = async (localPath, filename) => {
   const zipPath = `${localPath}/${filename}.zip`;
@@ -305,10 +336,10 @@ async function downloadDirectory(sftp, remotePath, localPath) {
 
   // Process each item in the directory
   for (const item of items) {
-    const remoteItemPath = join(remotePath, item.filename);
-    const localItemPath = join(localPath, item.filename);
+    const remoteItemPath = path.join(remotePath, item.filename);
+    const localItemPath = path.join(localPath, item.filename);
 
-    if (item.attrs.isDirectory()) {
+    if (item.longname[0] === 'd') {
       // Recursive call to download directory
       await downloadDirectory(sftp, remoteItemPath, localItemPath);
     } else {
@@ -319,9 +350,16 @@ async function downloadDirectory(sftp, remotePath, localPath) {
           else resolve();
         });
       });
+
+      // Preserve the original modification and access times
+      const stats = await sftpStat(sftp, remoteItemPath);
+      const mtime = stats.mtime;
+      const atime = stats.atime || new Date();
+      await fsPromises.utimes(localItemPath, atime, mtime);
     }
   }
 }
+
 
 app.post('/lovely/upload', authenticateJWT, (req, res) => {
   let files = req.files.files; // Files uploaded
@@ -542,18 +580,364 @@ async function ensureDirectoryExists(sftp, dir) {
 }
 
 
+const cacheDir = path.join(os.tmpdir(), 'image_cache');
+
+// Ensure the cache directory exists
+if (!fs.existsSync(cacheDir)) {
+  fs.mkdirSync(cacheDir);
+}
+
+app.get('/lovely/download-preview', authenticateJWT, (req, res) => {
+  const filePath = req.query.path;
+
+  const conn = new Client();
+  conn.on('ready', () => {
+    conn.sftp((err, sftp) => {
+      if (err) {
+        console.error('SFTP connection error:', err);
+        res.status(500).send('SFTP connection error');
+        return;
+      }
+
+      const fileExtension = path.extname(filePath).toLowerCase();
+      const cacheFilePath = path.join(cacheDir, path.basename(filePath) + '.jpg');
+
+      // Handle HEIC files with caching and resizing
+      if (fileExtension === '.heic') {
+        if (fs.existsSync(cacheFilePath)) {
+          console.log('Serving cached HEIC thumbnail:', cacheFilePath);
+          return res.sendFile(cacheFilePath);
+        }
+
+        const chunks = [];
+        const readStream = sftp.createReadStream(filePath);
+        readStream.on('data', (chunk) => chunks.push(chunk));
+        readStream.on('end', async () => {
+          const heicBuffer = Buffer.concat(chunks);
+
+          try {
+            const outputBuffer = await heicConvert({
+              buffer: heicBuffer,
+              format: 'JPEG',
+              quality: 1,
+            });
+
+            // Resize the image to a smaller size for previews
+            sharp(outputBuffer)
+              .rotate() // Preserve EXIF orientation
+              .resize(800, 600) // Resize for faster loading
+              .toBuffer((err, resizedBuffer) => {
+                if (err) {
+                  console.error('Error resizing HEIC image:', err);
+                  return res.status(500).send('Error resizing HEIC image');
+                }
+
+                // Write the resized image to cache
+                fs.writeFileSync(cacheFilePath, resizedBuffer);
+
+                res.setHeader('Content-Type', 'image/jpeg');
+                res.send(resizedBuffer); // Send the resized image
+              });
+          } catch (conversionError) {
+            console.error('Error converting HEIC:', conversionError);
+            res.status(500).send('Error converting HEIC file');
+          }
+        });
+
+        readStream.on('error', (err) => {
+          console.error('Error in file stream:', err);
+          res.status(500).send('Error streaming file');
+        });
+      }
+
+      // Handle video files (generate and cache thumbnail using ffmpeg)
+      else if (/\.(mp4|mov|avi|webm|mkv)$/i.test(filePath)) {
+        if (fs.existsSync(cacheFilePath)) {
+          console.log('Serving cached video thumbnail:', cacheFilePath);
+          return res.sendFile(cacheFilePath);
+        }
+
+        const tempLocalVideoPath = path.join(os.tmpdir(), `${path.basename(filePath)}`);
+        const tempThumbnailPath = path.join(os.tmpdir(), `${path.basename(filePath)}.jpg`);
+
+        console.log('Starting video download:', tempLocalVideoPath);
+
+        // Download video file to a temporary local path
+        const videoStream = sftp.createReadStream(filePath);
+        const videoFileWriteStream = fs.createWriteStream(tempLocalVideoPath);
+
+        videoStream.pipe(videoFileWriteStream);
+
+        videoFileWriteStream.on('finish', () => {
+          console.log('Video downloaded successfully:', tempLocalVideoPath);
+
+          if (!fs.existsSync(tempLocalVideoPath)) {
+            console.error('Downloaded video file not found:', tempLocalVideoPath);
+            return res.status(500).send('Error: Video file not found');
+          }
+
+          // Generate the thumbnail using ffmpeg
+          const ffmpeg = spawn('ffmpeg', [
+            '-i', tempLocalVideoPath,          // Local path to the downloaded video
+            '-ss', '00:01:00',                 // Capture frame at 60 seconds in
+            '-vframes', '1',                   // Capture one frame
+            '-q:v', '5',                       // Lower quality for testing
+            '-vf', 'eq=brightness=0.05:saturation=1.2',  // Brightness and saturation adjustments
+            tempThumbnailPath                  // Output file for the thumbnail
+          ]);
+
+          ffmpeg.on('close', (code) => {
+            if (code !== 0) {
+              console.error(`ffmpeg process exited with code ${code}`);
+              return res.status(500).send('Error generating video thumbnail');
+            }
+
+            console.log('Thumbnail generated:', tempThumbnailPath);
+
+            // Cache the thumbnail
+            fs.copyFileSync(tempThumbnailPath, cacheFilePath);
+
+            // Send the generated thumbnail
+            res.setHeader('Content-Type', 'image/jpeg');
+            res.sendFile(tempThumbnailPath, (err) => {
+              if (err) {
+                console.error('Error sending thumbnail:', err);
+                res.status(500).send('Error sending thumbnail');
+              } else {
+                // Clean up the temporary video and thumbnail files
+                fs.unlink(tempLocalVideoPath, (err) => {
+                  if (err) console.error('Error deleting temp video file:', err);
+                });
+                fs.unlink(tempThumbnailPath, (err) => {
+                  if (err) console.error('Error deleting temp thumbnail file:', err);
+                });
+              }
+            });
+          });
+
+          ffmpeg.on('error', (error) => {
+            console.error('Error executing ffmpeg:', error);
+            res.status(500).send('Error generating video thumbnail');
+          });
+        });
+
+        videoFileWriteStream.on('error', (err) => {
+          console.error('Error writing video file to local temp path:', err);
+          res.status(500).send('Error downloading video for thumbnail generation');
+        });
+      }
+
+      // Handle other image files (jpg, png, gif, bmp, etc.) with orientation fix
+      else if (/\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(filePath)) {
+        if (fs.existsSync(cacheFilePath)) {
+          console.log('Serving cached image thumbnail:', cacheFilePath);
+          return res.sendFile(cacheFilePath);
+        }
+
+        // Resize and cache image with orientation correction
+        const chunks = [];
+        const readStream = sftp.createReadStream(filePath);
+        readStream.on('data', (chunk) => chunks.push(chunk));
+        readStream.on('end', async () => {
+          const imageBuffer = Buffer.concat(chunks);
+
+          try {
+            // Resize the image to a smaller size for previews and correct orientation
+            sharp(imageBuffer)
+              .rotate() // Automatically rotate based on EXIF Orientation tag
+              .resize(800, 600) // Resize for faster loading
+              .toBuffer((err, resizedBuffer) => {
+                if (err) {
+                  console.error('Error resizing image:', err);
+                  return res.status(500).send('Error resizing image');
+                }
+
+                // Write the resized image to cache
+                fs.writeFileSync(cacheFilePath, resizedBuffer);
+
+                res.setHeader('Content-Type', 'image/jpeg');
+                res.send(resizedBuffer); // Send the resized image
+              });
+          } catch (error) {
+            console.error('Error processing image:', error);
+            res.status(500).send('Error processing image');
+          }
+        });
+
+        readStream.on('error', (err) => {
+          console.error('Error in file stream:', err);
+          res.status(500).send('Error streaming image');
+        });
+      }
+
+      // Handle direct streaming for other files (no caching)
+      else {
+        const readStream = sftp.createReadStream(filePath);
+
+        res.setHeader('Content-Type', 'application/octet-stream'); // Default for non-handled files
+        readStream.pipe(res);
+
+        readStream.on('error', (err) => {
+          console.error('Error in file stream:', err);
+          res.status(500).send('Error streaming file');
+        });
+
+        readStream.on('close', () => {
+          conn.end();
+        });
+      }
+    });
+  }).connect(sftpConnectionDetails);
+});
+
+// Function to pre-cache video thumbnails
+async function precacheVideoThumbnails() {
+  const conn = new Client();
+  conn.on('ready', () => {
+    conn.sftp(async (err, sftp) => {
+      if (err) {
+        console.error('SFTP session error:', err);
+        return;
+      }
+
+      try {
+        // Define the directory you want to start caching from (e.g., root directory)
+        const startDir = '/';
+
+        // Recursively fetch all files from the SFTP server
+        await processDirectory(sftp, startDir);
+
+        conn.end();
+      } catch (error) {
+        console.error('Error during video pre-caching:', error);
+      }
+    });
+  }).connect(sftpConnectionDetails);
+}
+
+async function processDirectory(sftp, dirPath) {
+  const files = await new Promise((resolve, reject) => {
+    sftp.readdir(dirPath, (err, list) => {
+      if (err) reject(err);
+      else resolve(list);
+    });
+  });
+
+  for (const file of files) {
+    const fullPath = path.join(dirPath, file.filename);
+    if (file.longname.startsWith('d')) {
+      // If it's a directory, recursively process it
+      await processDirectory(sftp, fullPath);
+    } else if (/\.(mp4|mov|avi|webm|mkv)$/i.test(file.filename)) {
+      // If it's a video, generate and cache the thumbnail
+      await generateThumbnailForVideo(sftp, fullPath);
+    }
+  }
+}
+
+async function generateThumbnailForVideo(sftp, filePath) {
+  const cacheFilePath = path.join(cacheDir, path.basename(filePath) + '.jpg');
+  const placeholderImagePath = path.join(__dirname, 'assets', 'android-chrome-512x512.png'); // Path to your placeholder image
+
+  if (fs.existsSync(cacheFilePath)) {
+    console.log(`Thumbnail already cached for ${filePath}`);
+    return;
+  }
+
+  const tempLocalVideoPath = path.join(os.tmpdir(), `${path.basename(filePath)}`);
+  const tempThumbnailPath = path.join(os.tmpdir(), `${path.basename(filePath)}.jpg`);
+
+  console.log('Starting video download:', tempLocalVideoPath);
+
+  // Download the video to a local temp path
+  const videoStream = sftp.createReadStream(filePath);
+  const videoFileWriteStream = fs.createWriteStream(tempLocalVideoPath);
+
+  videoStream.pipe(videoFileWriteStream);
+
+  return new Promise((resolve, reject) => {
+    videoFileWriteStream.on('finish', () => {
+      console.log('Video downloaded successfully:', tempLocalVideoPath);
+
+      if (!fs.existsSync(tempLocalVideoPath)) {
+        console.error('Downloaded video file not found:', tempLocalVideoPath);
+        fs.copyFileSync(placeholderImagePath, cacheFilePath); // Copy placeholder on error
+        return resolve();  // Resolve and continue
+      }
+
+      // Generate the thumbnail using ffmpeg
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', tempLocalVideoPath,          // Local path to the downloaded video
+        '-ss', '00:01:00',                 // Capture frame at 60 seconds in
+        '-vframes', '1',                   // Capture one frame
+        '-q:v', '5',                       // Lower quality for testing
+        '-vf', 'eq=brightness=0.05:saturation=1.2',  // Brightness and saturation adjustments
+        tempThumbnailPath                  // Output file for the thumbnail
+      ]);
+
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          console.error(`ffmpeg process exited with code ${code} for file: ${filePath}`);
+          console.log(`Skipping thumbnail generation for unsupported file: ${filePath}`);
+          fs.copyFileSync(placeholderImagePath, cacheFilePath);  // Copy placeholder on error
+          return resolve();  // Skip the file and resolve to continue
+        }
+
+        console.log('Thumbnail generated:', tempThumbnailPath);
+
+        // Cache the thumbnail
+        fs.copyFileSync(tempThumbnailPath, cacheFilePath);
+        resolve();
+      });
+
+      ffmpeg.on('error', (error) => {
+        console.error('Error executing ffmpeg for file:', filePath, error);
+        fs.copyFileSync(placeholderImagePath, cacheFilePath);  // Copy placeholder on error
+        resolve();  // Log the error, resolve, and continue to the next file
+      });
+    });
+
+    videoFileWriteStream.on('error', (err) => {
+      console.error('Error writing video file to local temp path for file:', filePath, err);
+      fs.copyFileSync(placeholderImagePath, cacheFilePath);  // Copy placeholder on error
+      resolve();  // Log the error, resolve, and continue
+    });
+  }).finally(() => {
+    // Always clean up temp files, regardless of success or failure, but check existence first
+    if (fs.existsSync(tempLocalVideoPath)) {
+      fs.unlink(tempLocalVideoPath, (err) => {
+        if (err) console.error('Error deleting temp video file:', err);
+      });
+    }
+
+    if (fs.existsSync(tempThumbnailPath)) {
+      fs.unlink(tempThumbnailPath, (err) => {
+        if (err) console.error('Error deleting temp thumbnail file:', err);
+      });
+    }
+  });
+}
+
+
+
+
+
+
+
+
 
 const server = app.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);
   server.timeout = 0;
+  
   // Attach WebSocket server to the same HTTP server
   wss = new WebSocket.Server({ server });
-
   wss.on('connection', function connection(ws) {
     console.log('Client connected to WebSocket.');
-
-    // Add any message handlers or other WebSocket-related code here
   });
+
+  // Run the video thumbnail pre-caching process on server startup
+  precacheVideoThumbnails();
 });
 
 
