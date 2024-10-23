@@ -105,6 +105,7 @@ app.get('/lovely/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
+
 app.use('/lovely', express.static(path.join(__dirname, 'public'))); // Serve static files from 'public' directory
 // Serve static files from 'assets' directory
 // Middleware to parse URL-encoded bodies (as sent by HTML forms)
@@ -364,6 +365,7 @@ async function downloadDirectory(sftp, remotePath, localPath) {
 app.post('/lovely/upload', authenticateJWT, (req, res) => {
   let files = req.files.files; // Files uploaded
   const destinationPath = req.body.path; // Destination directory
+  const lastModified = req.body.lastModified ? parseInt(req.body.lastModified) : Date.now(); // Use provided lastModified timestamp or fallback to current time
 
   console.log('Files received:', files);
   console.log('Destination path:', destinationPath);
@@ -379,7 +381,7 @@ app.post('/lovely/upload', authenticateJWT, (req, res) => {
 
           try {
               if (!Array.isArray(files)) {
-                  files = [files];
+                  files = [files]; // Ensure it's an array
               }
 
               for (const file of files) {
@@ -410,6 +412,17 @@ app.post('/lovely/upload', authenticateJWT, (req, res) => {
                           else resolve();
                       });
                   });
+
+                  // Set the modification and access times on the remote file using lastModified
+                  const modifiedDate = new Date(lastModified);
+                  await new Promise((resolve, reject) => {
+                      sftp.utimes(remoteFilePath, modifiedDate, modifiedDate, (err) => {
+                          if (err) reject(err);
+                          else resolve();
+                      });
+                  });
+
+                  console.log(`Uploaded ${file.name} with original metadata`);
 
                   // If the file is a ZIP file, unzip it into a new directory
                   if (path.extname(file.name) === '.zip') {
@@ -457,6 +470,7 @@ app.post('/lovely/upload', authenticateJWT, (req, res) => {
       });
   }).connect(sftpConnectionDetails);
 });
+
 
 
 async function getUniqueFilePath(sftp, remoteFilePath) {
