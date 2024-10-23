@@ -1,3 +1,17 @@
+// Listen for popstate event to handle back/forward browser navigation
+// Listen for popstate event to handle back/forward browser navigation
+window.addEventListener('popstate', throttle(function(event) {
+    console.log('popstate triggered, event state:', event.state);
+    if (event.state && event.state.path) {
+        console.log('Navigating to path from history:', event.state.path);
+        // Fetch files based on the stored path in the history state
+        fetchFiles(event.state.path, false); // Do not push state again when using history
+    } else {
+        console.log('No valid state in popstate event');
+    }
+}, 200)); // Throttle to prevent multiple rapid calls
+
+
 document.addEventListener('DOMContentLoaded', function () {
     fetchFiles('/');
 
@@ -39,6 +53,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
 let activityTimeout;
 let refreshInterval;
+const debouncedOpenDirectory = debounce(openDirectory, 300); // Delay of 300ms
+const debouncedUpDirectory = debounce(upDirectory, 300);
 
 function detectUserActivity() {
     document.addEventListener('mousemove', resetActivityTimeout);
@@ -53,13 +69,14 @@ function resetActivityTimeout() {
     clearTimeout(activityTimeout);
     activityTimeout = setTimeout(setUserInactive, 300000); // 5 minutes of inactivity
 
+    // Use the last successful path (currentDisplayedPath) for auto-refresh
     if (!refreshInterval) {
         refreshInterval = setInterval(() => {
-            const currentPath = document.getElementById('path-input').value;
-            fetchFiles(currentPath);
-        }, 1000); // Refresh every 1 minute
+            fetchFiles(currentDisplayedPath);  // Use the current displayed path, not the input value
+        }, 1000);  // Refresh every 1 second
     }
 }
+
 
 function setUserInactive() {
     clearInterval(refreshInterval);
@@ -69,8 +86,15 @@ function setUserInactive() {
 function triggerFileUpload() {
     document.getElementById('file-input').click();
 }
+let currentDisplayedPath = null; // Track the currently displayed path to prevent unnecessary reloads
 
-function fetchFiles(path) {
+function fetchFiles(path, shouldPushState = true) {
+    // Avoid unnecessary fetching when the path hasn't changed
+    if (currentDisplayedPath === path) {
+        return;
+    }
+    currentDisplayedPath = path; // Update the current path to avoid redundant fetch calls
+
     const token = localStorage.getItem('token');
     updatePathInput(path);
     toggleUpDirectoryButton(path);
@@ -81,127 +105,144 @@ function fetchFiles(path) {
         return;
     }
 
-    fetch(`/lovely/sftp/list?path=${encodeURIComponent(path)}`, {  // Updated path
+    // Push state only when explicitly told to do so
+    if (shouldPushState) {
+        history.pushState({ path }, null, `/lovely/sftp?path=${encodeURIComponent(path)}`);
+    }
+
+    fetch(`/lovely/sftp/list?path=${encodeURIComponent(path)}`, {
         headers: {
             'Authorization': 'Bearer ' + token
         }
     })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error('Failed to fetch files');
-            }
-            return response.json();
-        })
-        .then(files => {
-            const fileList = document.getElementById('file-list');
-            const existingItems = Array.from(fileList.children);
+    .then(response => {
+        // If the token is invalid or expired, redirect to login
+        if (response.status === 403) {
+            alert('Session has expired, please log in again.');
+            localStorage.removeItem('token');
+            window.location.href = '/lovely';
+            throw new Error('Session expired');
+        }
+        if (!response.ok) {
+            throw new Error('Failed to fetch files');
+        }
+        return response.json();
+    })
+    .then(files => {
+        const fileList = document.getElementById('file-list');
+        const existingItems = Array.from(fileList.children);
 
-            // Remove items that are not in the new list
-            existingItems.forEach(item => {
-                const fileName = item.querySelector('span').textContent;
-                if (!files.some(file => file.name === fileName)) {
-                    fileList.removeChild(item);
-                }
-            });
+        // Compare and update the list without clearing it entirely
+        files.forEach(file => {
+            const existingItem = existingItems.find(item => item.querySelector('span').textContent === file.name);
 
-            files.forEach(file => {
-                const existingItem = existingItems.find(item => item.querySelector('span').textContent === file.name);
+            if (!existingItem) {
+                const fileItem = document.createElement('li');
+                fileItem.classList.add('directory-item');
 
-                if (!existingItem) {
-                    const fileItem = document.createElement('li');
-                    fileItem.classList.add('directory-item');
+                let fileIcon;
+                if (file.type === 'directory') {
+                    fileIcon = document.createElement('img');
+                    fileIcon.src = '/lovely/assets/folder-icon.png';  // Updated path
+                    fileIcon.alt = 'Folder';
+                    fileIcon.classList.add('folder-icon');
+                    fileIcon.onclick = () => openDirectory(path, file.name);
 
-                    let fileIcon;
-                    if (file.type === 'directory') {
+                    const fileName = document.createElement('span');
+                    fileName.classList.add('file-name');
+                    fileName.classList.add('directory');
+                    fileName.textContent = file.name;
+                    fileName.onclick = () => openDirectory(path, file.name);
+
+                    fileItem.appendChild(fileIcon);
+                    fileItem.appendChild(fileName);
+                } else {
+                    const fileName = document.createElement('span');
+                    fileName.textContent = file.name;
+
+                    // Check for image or video and create a preview
+                    if (isImage(file.name)) {
+                        fileIcon = createImagePreview(file, path); // Create image preview
+                    } else if (isVideo(file.name)) {
+                        fileIcon = createVideoPreview(file, path); // Create video preview
+                    } else if (file.name.endsWith('.jar')) {
                         fileIcon = document.createElement('img');
-                        fileIcon.src = '/lovely/assets/folder-icon.png';  // Updated path
-                        fileIcon.alt = 'Folder';
-                        fileIcon.classList.add('folder-icon');
-                        fileIcon.onclick = () => openDirectory(path, file.name);
-
-                        const fileName = document.createElement('span');
-                        fileName.classList.add('file-name'); // Ensure the class is applied here
-                        fileName.classList.add('directory');
-                        fileName.textContent = file.name;
-                        fileName.onclick = () => openDirectory(path, file.name);
-
-                        fileItem.appendChild(fileIcon);
-                        fileItem.appendChild(fileName);
+                        fileIcon.src = '/lovely/assets/jar.png';
+                        fileIcon.alt = 'JAR File';
+                    } else if (file.name.endsWith('.gz')) {
+                        fileIcon = document.createElement('img');
+                        fileIcon.src = '/lovely/assets/gz.png';
+                        fileIcon.alt = 'GZ File';
+                    } else if (file.name.endsWith('.png')) {
+                        fileIcon = document.createElement('img');
+                        fileIcon.src = '/lovely/assets/png.png';
+                        fileIcon.alt = 'PNG File';
+                    } else if (file.name.endsWith('.zip')) {
+                        fileIcon = document.createElement('img');
+                        fileIcon.src = '/lovely/assets/zip-icon.png';
+                        fileIcon.alt = 'ZIP File';
                     } else {
-                        const fileName = document.createElement('span');
-                        fileName.textContent = file.name;
-                        // Check for image or video and create a preview
-                        if (isImage(file.name)) {
-                            fileIcon = createImagePreview(file, path); // Create image preview
-                        } else if (isVideo(file.name)) {
-                            fileIcon = createVideoPreview(file, path); // Create video preview
-                        }
-                        else if (file.name.endsWith('.jar')) {
-                            fileIcon = document.createElement('img');
-                            fileIcon.src = '/lovely/assets/jar.png';  // Updated path
-                            fileIcon.alt = 'JAR File';
-                        } else if (file.name.endsWith('.gz')) {
-                            fileIcon = document.createElement('img');
-                            fileIcon.src = '/lovely/assets/gz.png';  // Updated path
-                            fileIcon.alt = 'GZ File';
-                        } else if (file.name.endsWith('.png')) {
-                            fileIcon = document.createElement('img');
-                            fileIcon.src = '/lovely/assets/png.png';  // Updated path
-                            fileIcon.alt = 'PNG File';
-                        } else if (file.name.endsWith('.zip')) {
-                            fileIcon = document.createElement('img');
-                            fileIcon.src = '/lovely/assets/zip-icon.png';  // Updated path
-                            fileIcon.alt = 'ZIP File';
-                        } else {
-                            fileIcon = document.createElement('img');
-                            fileIcon.src = '/lovely/assets/file.png';  // Updated path
-                            fileIcon.alt = 'File';
-                        }
-                        fileIcon.classList.add('file-icon');
-                        fileItem.appendChild(fileIcon);
-                        fileName.classList.add('file-name'); // Ensure the class is applied here
-                        fileItem.appendChild(fileName);
+                        fileIcon = document.createElement('img');
+                        fileIcon.src = '/lovely/assets/file.png';
+                        fileIcon.alt = 'File';
                     }
-
-                    const downloadForm = document.createElement('form');
-                    downloadForm.method = 'POST';
-                    downloadForm.action = '/lovely/download'; // Adjusted to lovely route
-                    downloadForm.onsubmit = function () {
-                        const tokenInput = document.createElement('input');
-                        tokenInput.type = 'hidden';
-                        tokenInput.name = 'token';
-                        tokenInput.value = localStorage.getItem('token');
-                        downloadForm.appendChild(tokenInput);
-
-                        showLoadingSpinner(downloadForm);
-
-                        return true;
-                    };
-
-
-                    const pathInput = document.createElement('input');
-                    pathInput.type = 'hidden';
-                    pathInput.name = 'path';
-                    pathInput.value = path.endsWith('/') ? path + file.name : path + '/' + file.name;
-
-                    const downloadButton = document.createElement('button');
-                    downloadButton.type = 'submit';
-                    downloadButton.classList.add('download-button');
-                    downloadButton.textContent = 'Download';
-
-                    downloadForm.appendChild(pathInput);
-                    downloadForm.appendChild(downloadButton);
-
-                    fileItem.appendChild(downloadForm);
-                    fileList.appendChild(fileItem);
+                    fileIcon.classList.add('file-icon');
+                    fileItem.appendChild(fileIcon);
+                    fileName.classList.add('file-name');
+                    fileItem.appendChild(fileName);
                 }
-            });
-        })
-        .catch(error => {
-            console.error('Error fetching files:', error);
-            alert('Error fetching files. Please try again.');
+
+                const downloadForm = document.createElement('form');
+                downloadForm.method = 'POST';
+                downloadForm.action = '/lovely/download';
+                downloadForm.onsubmit = function () {
+                    const tokenInput = document.createElement('input');
+                    tokenInput.type = 'hidden';
+                    tokenInput.name = 'token';
+                    tokenInput.value = localStorage.getItem('token');
+                    downloadForm.appendChild(tokenInput);
+
+                    showLoadingSpinner(downloadForm);
+
+                    return true;
+                };
+
+                const pathInput = document.createElement('input');
+                pathInput.type = 'hidden';
+                pathInput.name = 'path';
+                pathInput.value = path.endsWith('/') ? path + file.name : path + '/' + file.name;
+
+                const downloadButton = document.createElement('button');
+                downloadButton.type = 'submit';
+                downloadButton.classList.add('download-button');
+                downloadButton.textContent = 'Download';
+
+                downloadForm.appendChild(pathInput);
+                downloadForm.appendChild(downloadButton);
+
+                fileItem.appendChild(downloadForm);
+                fileList.appendChild(fileItem);
+            }
         });
+
+        // Remove any items that no longer exist in the current directory
+        existingItems.forEach(item => {
+            const fileName = item.querySelector('span').textContent;
+            if (!files.some(file => file.name === fileName)) {
+                fileList.removeChild(item);
+            }
+        });
+    })
+    .catch(error => {
+        console.error('Error fetching files:', error);
+        if (error.message !== 'Session expired') {
+            alert('Error fetching files. Please try again.');
+        }
+    });
 }
+
+
+
 
 
 function showLoadingSpinner(form) {
@@ -290,11 +331,25 @@ function handleFetchResponse(response) {
     }
     return response;
 }
+// Modify the event listener for pressing Enter (no debounce, no automatic directory fetching)
+const pathInput = document.getElementById('path-input');
+pathInput.addEventListener('keypress', function (event) {
+    if (event.key === 'Enter') {
+        changeDirectory(); // Only trigger directory change on Enter
+    }
+});
 
 function changeDirectory() {
     const path = document.getElementById('path-input').value;
+
+    // Ensure path is not empty
+    if (!path || path.trim() === '') {
+        console.log('Empty path, skipping fetch');
+        return;
+    }
+
     const token = localStorage.getItem('token');
-    fetch('/lovely/change-directory', {  // Updated path
+    fetch('/lovely/change-directory', {
         method: 'POST',
         headers: {
             'Authorization': 'Bearer ' + token,
@@ -302,16 +357,31 @@ function changeDirectory() {
         },
         body: JSON.stringify({ path: path })
     })
-        .then(handleFetchResponse)
-        .then(response => response.json())
-        .then(data => fetchFiles(data.path))
-        .catch(error => console.error('Error changing directory:', error));
+    .then(handleFetchResponse)
+    .then(response => response.json())
+    .then(data => fetchFiles(data.path))
+    .catch(error => {
+        console.error('Error changing directory:', error);
+        alert('Error fetching files. Please try again.');
+    });
 }
+
 
 function openDirectory(currentPath, dirName) {
     const token = localStorage.getItem('token');
     const newPath = currentPath.endsWith('/') ? currentPath + dirName : currentPath + '/' + dirName;
-    fetch(`/lovely/open-directory`, {  // Updated path
+
+    console.log('Attempting to open directory:', newPath); // Log each click
+
+    // Only push state if the directory is actually changing
+    if (newPath !== currentPath && window.location.pathname !== `/lovely/sftp?path=${encodeURIComponent(newPath)}`) {
+        console.log('Pushing state for new directory:', newPath); // Log state change
+        history.pushState({ path: newPath }, null, `/lovely/sftp?path=${encodeURIComponent(newPath)}`);
+    } else {
+        console.log('State already exists or path has not changed.');
+    }
+
+    fetch(`/lovely/open-directory`, {
         method: 'POST',
         headers: {
             'Authorization': 'Bearer ' + token,
@@ -319,10 +389,35 @@ function openDirectory(currentPath, dirName) {
         },
         body: JSON.stringify({ path: newPath })
     })
-        .then(handleFetchResponse)
-        .then(response => response.json())
-        .then(data => fetchFiles(data.path))
-        .catch(error => console.error('Error opening directory:', error));
+    .then(handleFetchResponse)
+    .then(response => response.json())
+    .then(data => {
+        console.log('Directory opened successfully. Fetch response received.');
+        fetchFiles(data.path, false); // Do not push state again when navigating
+    })
+    .catch(error => {
+        console.error('Error opening directory:', error);
+    });
+}
+
+
+function throttle(func, limit) {
+    let inThrottle;
+    return function(...args) {
+        if (!inThrottle) {
+            func.apply(this, args);
+            inThrottle = true;
+            setTimeout(() => (inThrottle = false), limit);
+        }
+    };
+}
+
+function debounce(func, delay) {
+    let timeout;
+    return function(...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), delay);
+    };
 }
 
 function updatePathInput(path) {
@@ -335,9 +430,16 @@ function upDirectory() {
     if (currentPath === '/' || currentPath === '') {
         return; // Already at the root, cannot go up
     }
+
     const newPath = currentPath.split('/').slice(0, -1).join('/') || '/';
+
+    if (newPath !== currentPath) {
+        console.log('Pushing state for moving up directory:', newPath);
+        history.pushState({ path: newPath }, null, `/lovely/sftp?path=${encodeURIComponent(newPath)}`);
+    }
+
     const token = localStorage.getItem('token');
-    fetch(`/lovely/open-directory`, {  // Updated path
+    fetch(`/lovely/open-directory`, {
         method: 'POST',
         headers: {
             'Authorization': 'Bearer ' + token,
@@ -345,11 +447,13 @@ function upDirectory() {
         },
         body: JSON.stringify({ path: newPath })
     })
-        .then(handleFetchResponse)
-        .then(response => response.json())
-        .then(data => fetchFiles(data.path))
-        .catch(error => console.error('Error going up directory:', error));
+    .then(handleFetchResponse)
+    .then(response => response.json())
+    .then(data => fetchFiles(data.path, false)) // Do not push state again
+    .catch(error => console.error('Error going up directory:', error));
 }
+
+
 
 function toggleUpDirectoryButton(path) {
     const upDirectoryButton = document.getElementById('up-directory-button');
@@ -367,8 +471,10 @@ function uploadFiles() {
     const files = Array.from(fileInput.files);
     const formData = new FormData();
 
+    // Append each file and its lastModified timestamp
     files.forEach(file => {
         formData.append('files', file, file.webkitRelativePath || file.name);
+        formData.append('lastModified', file.lastModified); // Include the lastModified date
     });
 
     formData.append('path', currentPath);
@@ -396,7 +502,6 @@ function uploadFiles() {
         if (event.lengthComputable) {
             progressDetected = true;
             const percentComplete = (event.loaded / event.total) * 100;
-
             if (percentComplete >= 1) {
                 progressBar.value = percentComplete;  // Update the progress bar with actual progress
                 uploadPercentage.textContent = `${Math.round(percentComplete)}%`;  // Update the text
@@ -445,6 +550,7 @@ function uploadFiles() {
 
     xhr.send(formData);
 }
+
 
 
 function generateUniqueId() {
