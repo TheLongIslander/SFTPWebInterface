@@ -939,6 +939,9 @@ async function generateThumbnailForVideo(sftp, filePath) {
 
 
 
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'sftp.html'));
+});
 
 const server = app.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);
