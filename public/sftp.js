@@ -294,7 +294,7 @@ function logout() {
     const token = localStorage.getItem('token');
     if (!token) {
         alert('No active session.');
-        window.location.href = '/';
+        window.location.href = '/lovely';
         return;
     }
 
@@ -309,7 +309,7 @@ function logout() {
             if (response && response.ok) {
                 console.log('Logout successful on server.');
                 localStorage.removeItem('token'); // Clear the token
-                window.location.href = '/'; // Redirect to login
+                window.location.href = '/lovely'; // Redirect to login
             } else {
                 console.log('Server responded with an error during logout.');
             }
