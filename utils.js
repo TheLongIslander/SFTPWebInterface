@@ -1,20 +1,20 @@
-// utils.js
 const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 
-// Initialize the SQLite database
+// Initialize the SQLite database for blacklisted tokens
 const db = new sqlite3.Database('./token_blacklist.db', sqlite3.OPEN_READWRITE, (err) => {
     if (err) {
         return console.error('Error opening database:', err.message);
     }
-    console.log('Connected to the SQLite database.');
+    console.log('Connected to the token blacklist database.');
 });
+
+// Initialize the database for general server logs
 const logDB = new sqlite3.Database('./server_logs.db', sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
     if (err) {
-        console.error('Error when creating the database', err);
+        console.error('Error when creating the server logs database', err);
     } else {
-        console.log('Database created!');
-        // Create the table if it does not exist
+        console.log('Server logs database created!');
         logDB.run(`CREATE TABLE IF NOT EXISTS server_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             action TEXT NOT NULL,
@@ -22,6 +22,8 @@ const logDB = new sqlite3.Database('./server_logs.db', sqlite3.OPEN_READWRITE | 
         )`);
     }
 });
+
+// Initialize the database for SFTP activity logs
 const activityDb = new sqlite3.Database('./sftp_activity_log.db', sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE, (err) => {
     if (err) {
       console.error(err.message);
@@ -37,15 +39,18 @@ const activityDb = new sqlite3.Database('./sftp_activity_log.db', sqlite3.OPEN_R
       )
     `, (err) => {
       if (err) {
-        console.error(err.message);
+        console.error('Error creating sftp_activity_log table:', err.message);
       }
     });
-  });
+});
 
+// Get current Eastern Time as a formatted string
 function getEasternTime() {
     const date = new Date();
     return date.toLocaleString('en-US', { timeZone: 'America/New_York' });
 }
+
+// Get formatted date in a more readable format
 function getFormattedDate() {
     const date = new Date();
     const day = date.getDate();
@@ -55,14 +60,17 @@ function getFormattedDate() {
     if (day % 10 === 1 && day !== 11) suffix = 'st';
     else if (day % 10 === 2 && day !== 12) suffix = 'nd';
     else if (day % 10 === 3 && day !== 13) suffix = 'rd';
-  
+
     return `${month} ${day}${suffix}, ${year}`;
-  }
-  function getEasternDateHour() {
+}
+
+// Get Eastern Date and hour in numeric format
+function getEasternDateHour() {
     const date = new Date();
     return date.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: 'numeric', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
+// Cleanup expired tokens in the blacklist database
 function cleanupExpiredTokens() {
     console.log("Running cleanup...");
     db.all('SELECT token FROM blacklisted_tokens', [], (err, rows) => {
@@ -81,15 +89,19 @@ function cleanupExpiredTokens() {
         });
     });
 }
+
+// Log general server actions
 function logServerAction(action) {
     const timestamp = getEasternTime(); // This will fetch the time in Eastern Time
     logDB.run('INSERT INTO server_logs (action, timestamp) VALUES (?, ?)', [action, timestamp], (err) => {
         if (err) {
-            return console.error('Error logging to database:', err.message);
+            return console.error('Error logging to server_logs database:', err.message);
         }
         console.log(`Logged action "${action}" at ${timestamp}`);
     });
 }
+
+// Log SFTP server actions with detailed information
 function logSFTPServerAction(username, action, filePath, ipAddress) {
     const timestamp = getEasternTime(); // Fetch the time in Eastern Time
     console.log(`Attempting to log action: ${action} by ${username} on ${filePath} at ${timestamp} from IP ${ipAddress}`); // Debug log
@@ -98,7 +110,7 @@ function logSFTPServerAction(username, action, filePath, ipAddress) {
         VALUES (?, ?, ?, ?, ?)
     `, [username, action, filePath, timestamp, ipAddress], (err) => {
         if (err) {
-            return console.error('Error logging to database:', err.message);
+            return console.error('Error logging to sftp_activity_log database:', err.message);
         }
         console.log(`Logged SFTP action "${action}" by ${username} on ${filePath} at ${timestamp} from IP ${ipAddress}`);
     });
