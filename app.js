@@ -21,6 +21,9 @@ const unzipper = require('unzipper');
 const heicConvert = require('heic-convert');
 const { readdir } = require('fs/promises');
 const sharp = require('sharp');  // For image resizing
+const { Worker } = require('worker_threads');
+const { PDFDocument } = require('pdf-lib');
+const { PDFImage } = require('pdf-image');
 let wss;
 
 const { getEasternTime, getFormattedDate, getEasternDateHour, cleanupExpiredTokens, logServerAction, logSFTPServerAction } = require('./utils');  // Adjust the path as necessary based on your file structure
@@ -88,6 +91,7 @@ const db = new sqlite3.Database('./token_blacklist.db', sqlite3.OPEN_READWRITE |
     }
   });
 });
+
 
 const sftpStat = (sftp, filePath) => {
   return new Promise((resolve, reject) => {
@@ -222,40 +226,78 @@ app.post('/lovely/download', (req, res) => {
   const token = req.body.token;
   const filePath = req.body.path;
   const filename = path.basename(filePath);
-  const localPath = path.join(os.tmpdir(), filename); // Local path to save directory
-
+  const localPath = path.join(os.tmpdir(), filename); // Local path to save the .pages directory
+  const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.socket.remoteAddress || req.connection.socket.remoteAddress;
+  const formattedIpAddress = ipAddress.startsWith('::ffff:') ? ipAddress.replace('::ffff:', '') : (ipAddress === '::1' ? '127.0.0.1' : ipAddress);
+  // Log user token verification
   jwt.verify(token, process.env.JWT_SECRET, async (err, user) => {
     if (err) {
+      console.error(`Failed token verification for download attempt on ${filePath}`);
+      logSFTPServerAction('unknown', 'download', filePath, ipAddress, 0, 'Token verification failed');
       return res.sendStatus(403);
     }
+
+    console.log(`User ${user.username} is attempting to download ${filePath}`);
+    logSFTPServerAction(user.username, 'download_attempt', filePath, formattedIpAddress );
 
     const conn = new Client();
     conn.on('ready', () => {
       conn.sftp(async (err, sftp) => {
         if (err) {
           console.error('SFTP connection error:', err);
+          logSFTPServerAction(user.username, 'download', filePath, ipAddress, 0, 'SFTP connection error');
           return res.status(500).send('SFTP connection error: ' + err.message);
         }
 
         try {
           const stats = await sftpStat(sftp, filePath);
 
-          if (stats.isDirectory()) {
-            // Reintroduce directory download logic
+          if (stats.isDirectory() && !filePath.endsWith('.pages')) {
+            console.log(`Downloading directory: ${filePath}`);
             await downloadDirectory(sftp, filePath, localPath); // Recursively download directory
+
+            console.log(`Zipping directory ${filePath}...`);
             const zipPath = await zipDirectory(localPath, filename);
 
-            // Send the zipped directory
             res.download(zipPath, `${filename}.zip`, (err) => {
               if (err) {
                 console.error('Error sending the zip file:', err);
+                logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, 'Error sending zip file');
                 return;
               }
-              // Clean up after sending the file
+              console.log(`Directory ${filePath} successfully downloaded by ${user.username}`);
+              logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
               exec(`rm -rf "${localPath}" "${zipPath}"`);
             });
+
+          } else if (filePath.endsWith('.pages')) {
+            console.log(`Downloading .pages package: ${filePath}`);
+            await downloadDirectory(sftp, filePath, localPath); // Download the .pages directory
+
+            const tempZipPath = `${localPath}.zip`;
+            console.log(`Zipping .pages package ${filePath}...`);
+
+            exec(`zip -r "${tempZipPath}" "${localPath}"`, (err, stdout, stderr) => {
+              if (err) {
+                console.error('Error zipping .pages file:', stderr);
+                logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, 'Error zipping .pages file');
+                return res.status(500).send('Error zipping .pages file');
+              }
+
+              res.download(tempZipPath, `${filename}.pages`, (err) => {
+                if (err) {
+                  console.error('Error sending the .pages file:', err);
+                  logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, 'Error sending .pages file');
+                  return;
+                }
+                console.log(`.pages package ${filePath} successfully downloaded by ${user.username}`);
+                logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
+                exec(`rm -rf "${tempZipPath}" "${localPath}"`);
+              });
+            });
+
           } else {
-            // Handle individual file download (same as before)
+            console.log(`Downloading file: ${filePath}`);
             await new Promise((resolve, reject) => {
               sftp.fastGet(filePath, localPath, (err) => {
                 if (err) reject(err);
@@ -263,29 +305,35 @@ app.post('/lovely/download', (req, res) => {
               });
             });
 
+            // Preserve file times
             const mtime = stats.mtime;
             const atime = stats.atime || new Date();
-
             await fsPromises.utimes(localPath, atime, mtime);
 
             const zipPath = `${localPath}.zip`;
+            console.log(`Zipping file ${filePath}...`);
             exec(`zip -j "${zipPath}" "${localPath}"`, (err) => {
               if (err) {
                 console.error('Error zipping file:', err);
+                logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, 'Error zipping file');
                 return res.status(500).send('Error zipping file');
               }
 
               res.download(zipPath, `${filename}.zip`, (err) => {
                 if (err) {
                   console.error('Error sending the zip file:', err);
+                  logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, 'Error sending zip file');
                   return;
                 }
+                console.log(`File ${filePath} successfully downloaded by ${user.username}`);
+                logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
                 exec(`rm -rf "${localPath}" "${zipPath}"`);
               });
             });
           }
         } catch (error) {
           console.error('Failed to process download:', error);
+          logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, error.message);
           if (!res.headersSent) {
             res.status(500).send('Failed to process download: ' + error.message);
           }
@@ -293,14 +341,12 @@ app.post('/lovely/download', (req, res) => {
           conn.end();
         }
       });
-    }).connect({
-      host: process.env.SFTP_HOST,
-      port: process.env.SFTP_PORT,
-      username: process.env.SFTP_USERNAME,
-      password: process.env.SFTP_PASSWORD
-    });
+    }).connect(sftpConnectionDetails);
   });
 });
+
+
+
 
 
 
@@ -455,9 +501,9 @@ app.post('/lovely/upload', authenticateJWT, (req, res) => {
                   });
 
                   // Log the upload activity
-                  const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-                  console.log('IP Address:', ipAddress); // Debug logging
-                  logSFTPServerAction(req.user.username, 'upload', remoteFilePath, ipAddress);
+                  const formattedIpAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+                  console.log('IP Address:', formattedIpAddress); // Debug logging
+                  logSFTPServerAction(req.user.username, 'upload', remoteFilePath, formattedIpAddress);
               }
 
               res.send('Files uploaded successfully');
@@ -616,193 +662,237 @@ app.get('/lovely/download-preview', authenticateJWT, (req, res) => {
       const fileExtension = path.extname(filePath).toLowerCase();
       const cacheFilePath = path.join(cacheDir, path.basename(filePath) + '.jpg');
 
-      // Handle HEIC files with caching and resizing
-      if (fileExtension === '.heic') {
-        if (fs.existsSync(cacheFilePath)) {
-          console.log('Serving cached HEIC thumbnail:', cacheFilePath);
-          return res.sendFile(cacheFilePath);
-        }
-
-        const chunks = [];
-        const readStream = sftp.createReadStream(filePath);
-        readStream.on('data', (chunk) => chunks.push(chunk));
-        readStream.on('end', async () => {
-          const heicBuffer = Buffer.concat(chunks);
-
-          try {
-            const outputBuffer = await heicConvert({
-              buffer: heicBuffer,
-              format: 'JPEG',
-              quality: 1,
-            });
-
-            // Resize the image to a smaller size for previews
-            sharp(outputBuffer)
-              .rotate() // Preserve EXIF orientation
-              .resize(800, 600) // Resize for faster loading
-              .toBuffer((err, resizedBuffer) => {
-                if (err) {
-                  console.error('Error resizing HEIC image:', err);
-                  return res.status(500).send('Error resizing HEIC image');
-                }
-
-                // Write the resized image to cache
-                fs.writeFileSync(cacheFilePath, resizedBuffer);
-
-                res.setHeader('Content-Type', 'image/jpeg');
-                res.send(resizedBuffer); // Send the resized image
-              });
-          } catch (conversionError) {
-            console.error('Error converting HEIC:', conversionError);
-            res.status(500).send('Error converting HEIC file');
-          }
-        });
-
-        readStream.on('error', (err) => {
-          console.error('Error in file stream:', err);
-          res.status(500).send('Error streaming file');
-        });
-      }
-
-      // Handle video files (generate and cache thumbnail using ffmpeg)
-      else if (/\.(mp4|mov|avi|webm|mkv)$/i.test(filePath)) {
-        if (fs.existsSync(cacheFilePath)) {
-          console.log('Serving cached video thumbnail:', cacheFilePath);
-          return res.sendFile(cacheFilePath);
-        }
-
-        const tempLocalVideoPath = path.join(os.tmpdir(), `${path.basename(filePath)}`);
-        const tempThumbnailPath = path.join(os.tmpdir(), `${path.basename(filePath)}.jpg`);
-
-        console.log('Starting video download:', tempLocalVideoPath);
-
-        // Download video file to a temporary local path
-        const videoStream = sftp.createReadStream(filePath);
-        const videoFileWriteStream = fs.createWriteStream(tempLocalVideoPath);
-
-        videoStream.pipe(videoFileWriteStream);
-
-        videoFileWriteStream.on('finish', () => {
-          console.log('Video downloaded successfully:', tempLocalVideoPath);
-
-          if (!fs.existsSync(tempLocalVideoPath)) {
-            console.error('Downloaded video file not found:', tempLocalVideoPath);
-            return res.status(500).send('Error: Video file not found');
-          }
-
-          // Generate the thumbnail using ffmpeg
-          const ffmpeg = spawn('ffmpeg', [
-            '-i', tempLocalVideoPath,          // Local path to the downloaded video
-            '-ss', '00:01:00',                 // Capture frame at 60 seconds in
-            '-vframes', '1',                   // Capture one frame
-            '-q:v', '5',                       // Lower quality for testing
-            '-vf', 'eq=brightness=0.05:saturation=1.2',  // Brightness and saturation adjustments
-            tempThumbnailPath                  // Output file for the thumbnail
-          ]);
-
-          ffmpeg.on('close', (code) => {
-            if (code !== 0) {
-              console.error(`ffmpeg process exited with code ${code}`);
-              return res.status(500).send('Error generating video thumbnail');
-            }
-
-            console.log('Thumbnail generated:', tempThumbnailPath);
-
-            // Cache the thumbnail
-            fs.copyFileSync(tempThumbnailPath, cacheFilePath);
-
-            // Send the generated thumbnail
-            res.setHeader('Content-Type', 'image/jpeg');
-            res.sendFile(tempThumbnailPath, (err) => {
-              if (err) {
-                console.error('Error sending thumbnail:', err);
-                res.status(500).send('Error sending thumbnail');
-              } else {
-                // Clean up the temporary video and thumbnail files
-                fs.unlink(tempLocalVideoPath, (err) => {
-                  if (err) console.error('Error deleting temp video file:', err);
-                });
-                fs.unlink(tempThumbnailPath, (err) => {
-                  if (err) console.error('Error deleting temp thumbnail file:', err);
-                });
-              }
-            });
-          });
-
-          ffmpeg.on('error', (error) => {
-            console.error('Error executing ffmpeg:', error);
-            res.status(500).send('Error generating video thumbnail');
-          });
-        });
-
-        videoFileWriteStream.on('error', (err) => {
-          console.error('Error writing video file to local temp path:', err);
-          res.status(500).send('Error downloading video for thumbnail generation');
-        });
-      }
-
-      // Handle other image files (jpg, png, gif, bmp, etc.) with orientation fix
-      else if (/\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(filePath)) {
-        if (fs.existsSync(cacheFilePath)) {
-          console.log('Serving cached image thumbnail:', cacheFilePath);
-          return res.sendFile(cacheFilePath);
-        }
-
-        // Resize and cache image with orientation correction
-        const chunks = [];
-        const readStream = sftp.createReadStream(filePath);
-        readStream.on('data', (chunk) => chunks.push(chunk));
-        readStream.on('end', async () => {
-          const imageBuffer = Buffer.concat(chunks);
-
-          try {
-            // Resize the image to a smaller size for previews and correct orientation
-            sharp(imageBuffer)
-              .rotate() // Automatically rotate based on EXIF Orientation tag
-              .resize(800, 600) // Resize for faster loading
-              .toBuffer((err, resizedBuffer) => {
-                if (err) {
-                  console.error('Error resizing image:', err);
-                  return res.status(500).send('Error resizing image');
-                }
-
-                // Write the resized image to cache
-                fs.writeFileSync(cacheFilePath, resizedBuffer);
-
-                res.setHeader('Content-Type', 'image/jpeg');
-                res.send(resizedBuffer); // Send the resized image
-              });
-          } catch (error) {
-            console.error('Error processing image:', error);
-            res.status(500).send('Error processing image');
-          }
-        });
-
-        readStream.on('error', (err) => {
-          console.error('Error in file stream:', err);
-          res.status(500).send('Error streaming image');
-        });
-      }
-
-      // Handle direct streaming for other files (no caching)
-      else {
-        const readStream = sftp.createReadStream(filePath);
-
-        res.setHeader('Content-Type', 'application/octet-stream'); // Default for non-handled files
-        readStream.pipe(res);
-
-        readStream.on('error', (err) => {
-          console.error('Error in file stream:', err);
-          res.status(500).send('Error streaming file');
-        });
-
-        readStream.on('close', () => {
-          conn.end();
-        });
+      if (fileExtension === '.pdf') {
+        handlePDF(sftp, filePath, cacheFilePath, res);
+      } else if (fileExtension === '.heic') {
+        handleHEIC(sftp, filePath, cacheFilePath, res);
+      } else if (/\.(mp4|mov|avi|webm|mkv)$/i.test(filePath)) {
+        handleVideo(sftp, filePath, cacheFilePath, res);
+      } else if (/\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(filePath)) {
+        handleImage(sftp, filePath, cacheFilePath, res);
+      } else {
+        streamFile(sftp, filePath, res);
       }
     });
   }).connect(sftpConnectionDetails);
 });
+
+
+function handleVideo(sftp, filePath, cacheFilePath, res) {
+  if (fs.existsSync(cacheFilePath)) {
+    console.log('Serving cached video thumbnail:', cacheFilePath);
+    return res.sendFile(cacheFilePath);
+  }
+
+  const tempLocalVideoPath = path.join(os.tmpdir(), `${path.basename(filePath)}`);
+  const tempThumbnailPath = path.join(os.tmpdir(), `${path.basename(filePath)}.jpg`);
+  const videoStream = sftp.createReadStream(filePath);
+  const videoFileWriteStream = fs.createWriteStream(tempLocalVideoPath);
+
+  videoStream.pipe(videoFileWriteStream);
+
+  videoFileWriteStream.on('finish', () => {
+    const ffmpeg = spawn('ffmpeg', ['-i', tempLocalVideoPath, '-ss', '00:01:00', '-vframes', '1', '-q:v', '5', '-vf', 'eq=brightness=0.05:saturation=1.2', tempThumbnailPath]);
+
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) {
+        console.error(`ffmpeg exited with code ${code}`);
+        return res.status(500).send('Error generating video thumbnail');
+      }
+      fs.copyFileSync(tempThumbnailPath, cacheFilePath);
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.sendFile(tempThumbnailPath, (err) => cleanupFiles(tempLocalVideoPath, tempThumbnailPath, err, res));
+    });
+
+    ffmpeg.on('error', (error) => {
+      console.error('Error executing ffmpeg:', error);
+      res.status(500).send('Error generating video thumbnail');
+    });
+  });
+
+  videoFileWriteStream.on('error', (err) => {
+    console.error('Error writing video file:', err);
+    res.status(500).send('Error downloading video for thumbnail generation');
+  });
+}
+
+// Get the number of CPU cores (specifically performance cores on an M1 Max)
+const MAX_WORKERS = Math.min(8, os.cpus().length);  // Assuming 8 performance cores
+let activeWorkers = 0;
+const taskQueue = [];
+
+// Function to handle HEIC thumbnail generation with multithreading
+function handleHEIC(sftp, filePath, cacheFilePath, res) {
+  if (fs.existsSync(cacheFilePath)) {
+    console.log('Serving cached HEIC thumbnail:', cacheFilePath);
+    return res.sendFile(cacheFilePath);
+  }
+
+  const chunks = [];
+  const readStream = sftp.createReadStream(filePath);
+  readStream.on('data', (chunk) => chunks.push(chunk));
+  readStream.on('end', () => {
+    const heicBuffer = Buffer.concat(chunks);
+    
+    // Push the task to the queue
+    taskQueue.push(() => processHEICWorker(heicBuffer, cacheFilePath, res));
+    processQueue();  // Process the task queue
+  });
+
+  readStream.on('error', (err) => {
+    console.error('Error in file stream:', err);
+    res.status(500).send('Error streaming HEIC file');
+  });
+}
+
+// Process the task queue
+function processQueue() {
+  if (activeWorkers < MAX_WORKERS && taskQueue.length > 0) {
+    const task = taskQueue.shift();  // Get the next task in the queue
+    activeWorkers++;  // Increment active worker count
+    task().finally(() => {
+      activeWorkers--;  // Decrement worker count when task is done
+      processQueue();  // Process the next task in the queue
+    });
+  }
+}
+
+// Function to process HEIC in a worker thread
+function processHEICWorker(heicBuffer, cacheFilePath, res) {
+  return new Promise((resolve, reject) => {
+    // Spawn a new worker thread for HEIC conversion
+    const worker = new Worker(path.join(__dirname, 'heicWorker.js'));
+
+    worker.postMessage({ heicBuffer, cacheFilePath }); // Send data to the worker
+
+    worker.on('message', (message) => {
+      if (message.success) {
+        res.sendFile(message.cacheFilePath); // Serve the cached thumbnail
+        resolve();
+      } else {
+        console.error('Error generating HEIC thumbnail:', message.error);
+        res.status(500).send('Error generating HEIC thumbnail');
+        reject();
+      }
+    });
+
+    worker.on('error', (error) => {
+      console.error('Worker error:', error);
+      res.status(500).send('Error processing HEIC file');
+      reject(error);
+    });
+  });
+}
+
+function handleImage(sftp, filePath, cacheFilePath, res) {
+  if (fs.existsSync(cacheFilePath)) {
+    console.log('Serving cached image thumbnail:', cacheFilePath);
+    return res.sendFile(cacheFilePath);
+  }
+
+  const chunks = [];
+  const readStream = sftp.createReadStream(filePath);
+  readStream.on('data', (chunk) => chunks.push(chunk));
+  readStream.on('end', async () => {
+    const imageBuffer = Buffer.concat(chunks);
+    try {
+      sharp(imageBuffer)
+        .rotate()
+        .resize(800, 600)
+        .toBuffer((err, resizedBuffer) => {
+          if (err) {
+            console.error('Error resizing image:', err);
+            return res.status(500).send('Error resizing image');
+          }
+          fs.writeFileSync(cacheFilePath, resizedBuffer);
+          res.setHeader('Content-Type', 'image/jpeg');
+          res.send(resizedBuffer);
+        });
+    } catch (error) {
+      console.error('Error processing image:', error);
+      res.status(500).send('Error processing image');
+    }
+  });
+  readStream.on('error', (err) => {
+    console.error('Error in file stream:', err);
+    res.status(500).send('Error streaming image');
+  });
+}
+
+
+function streamFile(sftp, filePath, res) {
+  const readStream = sftp.createReadStream(filePath);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  readStream.pipe(res);
+
+  readStream.on('error', (err) => {
+    console.error('Error in file stream:', err);
+    res.status(500).send('Error streaming file');
+  });
+}
+
+function cleanupFiles(tempLocalVideoPath, tempThumbnailPath, err, res) {
+  if (err) {
+    console.error('Error sending thumbnail:', err);
+    return res.status(500).send('Error sending thumbnail');
+  }
+  // Clean up temporary video and thumbnail files
+  fs.unlink(tempLocalVideoPath, (err) => {
+    if (err) console.error('Error deleting temp video file:', err);
+  });
+  fs.unlink(tempThumbnailPath, (err) => {
+    if (err) console.error('Error deleting temp thumbnail file:', err);
+  });
+}
+
+
+function handlePDF(sftp, filePath, cacheFilePath, res) {
+  if (fs.existsSync(cacheFilePath)) {
+    console.log('Serving cached PDF thumbnail:', cacheFilePath);
+    return res.sendFile(cacheFilePath);
+  }
+
+  const tempPDFPath = path.join(os.tmpdir(), `${path.basename(filePath)}`);
+
+  // Download the PDF from SFTP to a local temporary file
+  const pdfStream = sftp.createReadStream(filePath);
+  const pdfFileWriteStream = fs.createWriteStream(tempPDFPath);
+
+  pdfStream.pipe(pdfFileWriteStream);
+
+  pdfFileWriteStream.on('finish', () => {
+    // Use pdf-image to generate a thumbnail from the first page
+    const pdfImage = new PDFImage(tempPDFPath, { combinedImage: false });
+
+    pdfImage.convertPage(0)  // 0 is the first page
+      .then((imagePath) => {
+        // Move the generated image to the cache location
+        fs.renameSync(imagePath, cacheFilePath);
+        console.log('PDF thumbnail generated:', cacheFilePath);
+
+        // Serve the generated thumbnail
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.sendFile(cacheFilePath);
+      })
+      .catch(err => {
+        console.error('Error converting PDF to thumbnail:', err);
+        res.status(500).send('Error generating PDF thumbnail');
+      })
+      .finally(() => {
+        // Clean up the temporary PDF file
+        fs.unlink(tempPDFPath, (err) => {
+          if (err) console.error('Error deleting temp PDF file:', err);
+        });
+      });
+  });
+
+  pdfFileWriteStream.on('error', (err) => {
+    console.error('Error writing PDF file to temp path:', err);
+    res.status(500).send('Error processing PDF');
+  });
+}
+
+
 
 // Function to pre-cache video thumbnails
 async function precacheVideoThumbnails() {
@@ -931,6 +1021,59 @@ async function generateThumbnailForVideo(sftp, filePath) {
     }
   });
 }
+app.post('/lovely/sftp/create-directory', authenticateJWT, (req, res) => {
+  const { path, directoryName } = req.body;
+
+  if (!directoryName || !path) {
+    return res.status(400).json({ message: 'Invalid directory name or path' });
+  }
+
+  const newDirectoryPath = path.endsWith('/') ? path + directoryName : path + '/' + directoryName;
+
+  const conn = new Client();
+  conn.on('ready', () => {
+    conn.sftp((err, sftp) => {
+      if (err) {
+        console.error('SFTP session error:', err);
+        res.status(500).json({ message: 'Failed to start SFTP session' });
+        return;
+      }
+
+      // Check if the directory already exists
+      sftp.stat(newDirectoryPath, (err, stats) => {
+        if (err && err.code === 2) { // If error code is 2, the directory does not exist
+          // Directory does not exist, proceed to create it
+          sftp.mkdir(newDirectoryPath, (err) => {
+            if (err) {
+              console.error('Error creating directory:', err);
+              res.status(500).json({ message: 'Failed to create directory' });
+            } else {
+              console.log(`Directory created: ${newDirectoryPath}`);
+              res.json({ message: 'Directory created successfully', path: newDirectoryPath });
+            }
+            conn.end();
+          });
+        } else if (stats) {
+          // Directory exists
+          console.log('A directory with that name already exists:', newDirectoryPath);
+          res.status(400).json({ message: 'A directory with that name already exists' });
+          conn.end();
+        } else {
+          console.error('Error checking directory existence:', err);
+          res.status(500).json({ message: 'Failed to check directory existence' });
+          conn.end();
+        }
+      });
+    });
+  }).on('error', (err) => {
+    console.error('Connection error:', err);
+    res.status(500).json({ message: 'Failed to connect to SFTP server' });
+  }).connect(sftpConnectionDetails);
+});
+
+
+
+
 
 
 
