@@ -62,6 +62,16 @@ header button:hover {
 #logout-button:hover {
     background-color: #a5231f;
 }
+#create-directory-button {
+    background-color: #7c11d3; /* Aqua color */
+    color: #fff;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    transition: background-color 0.3s ease;
+}
+
+#create-directory-button:hover {
+    background-color: #7214b1; /* Darker aqua color on hover */
+}
 
 
 .content {
@@ -191,6 +201,15 @@ li {
     margin-right: 10px;
     border-radius: 20px; /* Add rounded corners for video previews */
 }
+
+.pdf-thumbnail {
+    width: 100px; /* Set a narrower width for a vertical look */
+    height: 150px; /* Make it taller than it is wide */
+    object-fit: cover; /* Ensure the content fits the container */
+    margin-right: 10px;
+    border-radius: 20px; /* Add rounded corners for PDF thumbnails */
+}
+
 
 /* Specific styles for the Go button */
 #go-button {
