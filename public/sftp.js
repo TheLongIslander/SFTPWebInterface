@@ -1,6 +1,6 @@
 // Listen for popstate event to handle back/forward browser navigation
 // Listen for popstate event to handle back/forward browser navigation
-window.addEventListener('popstate', throttle(function(event) {
+window.addEventListener('popstate', throttle(function (event) {
     console.log('popstate triggered, event state:', event.state);
     if (event.state && event.state.path) {
         console.log('Navigating to path from history:', event.state.path);
@@ -11,6 +11,7 @@ window.addEventListener('popstate', throttle(function(event) {
     }
 }, 200)); // Throttle to prevent multiple rapid calls
 
+let typingInProgress = false;  // Declare at global scope
 
 document.addEventListener('DOMContentLoaded', function () {
     fetchFiles('/');
@@ -24,6 +25,22 @@ document.addEventListener('DOMContentLoaded', function () {
     pathInput.addEventListener('keypress', function (event) {
         if (event.key === 'Enter') {
             changeDirectory();
+        }
+    });
+
+    pathInput.addEventListener('input', function () {
+        typingInProgress = true;  // User is typing
+    });
+
+    pathInput.addEventListener('blur', function () {
+        typingInProgress = false; // User stopped typing (input lost focus)
+    });
+
+    const createDirectoryButton = document.getElementById('create-directory-button');
+    createDirectoryButton.addEventListener('click', function () {
+        const directoryName = prompt('Enter the new directory name:');
+        if (directoryName) {
+            createDirectory(directoryName);
         }
     });
 
@@ -72,15 +89,17 @@ function resetActivityTimeout() {
     // Use the last successful path (currentDisplayedPath) for auto-refresh
     if (!refreshInterval) {
         refreshInterval = setInterval(() => {
-            fetchFiles(currentDisplayedPath);  // Use the current displayed path, not the input value
+            fetchFiles(currentDisplayedPath, false, true);  // Use the current displayed path, force update
         }, 1000);  // Refresh every 1 second
     }
 }
 
 
+
 function setUserInactive() {
     clearInterval(refreshInterval);
     refreshInterval = null;
+    console.log('Auto-refresh stopped due to inactivity'); // Add log
 }
 
 function triggerFileUpload() {
@@ -88,16 +107,22 @@ function triggerFileUpload() {
 }
 let currentDisplayedPath = null; // Track the currently displayed path to prevent unnecessary reloads
 
-function fetchFiles(path, shouldPushState = true) {
-    // Avoid unnecessary fetching when the path hasn't changed
-    if (currentDisplayedPath === path) {
+function fetchFiles(path, shouldPushState = true, forceUpdate = false) {
+    // Avoid unnecessary fetching when the path hasn't changed (unless forceUpdate is true)
+    if (!forceUpdate && currentDisplayedPath === path) {
+        console.log('Path has not changed. Skipping fetch.');
         return;
     }
+
     currentDisplayedPath = path; // Update the current path to avoid redundant fetch calls
 
     const token = localStorage.getItem('token');
-    updatePathInput(path);
-    toggleUpDirectoryButton(path);
+
+    // Avoid updating the path input if the user is typing
+    if (!typingInProgress) {
+        const pathInput = document.getElementById('path-input');
+        pathInput.value = path; // Update the path in the search bar
+    }
 
     if (!token) {
         alert('You are not authenticated.');
@@ -115,132 +140,181 @@ function fetchFiles(path, shouldPushState = true) {
             'Authorization': 'Bearer ' + token
         }
     })
+        .then(response => {
+            // If the token is invalid or expired, redirect to login
+            if (response.status === 403) {
+                alert('Session has expired, please log in again.');
+                localStorage.removeItem('token');
+                window.location.href = '/lovely';
+                throw new Error('Session expired');
+            }
+            if (!response.ok) {
+                throw new Error('Failed to fetch files');
+            }
+            return response.json();
+        })
+        .then(files => {
+            const fileList = document.getElementById('file-list');
+            const existingItems = Array.from(fileList.children);
+
+            // Map existing file list for comparison
+            const existingFileMap = {};
+            existingItems.forEach(item => {
+                const name = item.querySelector('span').textContent;
+                existingFileMap[name] = item;
+            });
+
+            // Add or update the new file list
+            files.forEach(file => {
+                const existingItem = existingFileMap[file.name];
+
+                if (!existingItem) {
+                    // Create new file/directory entry
+                    const fileItem = document.createElement('li');
+                    fileItem.classList.add('directory-item');
+
+                    let fileIcon;
+                    if (file.type === 'directory') {
+                        fileIcon = document.createElement('img');
+                        fileIcon.src = '/lovely/assets/folder-icon.png';
+                        fileIcon.alt = 'Folder';
+                        fileIcon.classList.add('folder-icon');
+                        fileIcon.onclick = () => openDirectory(path, file.name);
+
+                        const fileName = document.createElement('span');
+                        fileName.classList.add('file-name');
+                        fileName.classList.add('directory');
+                        fileName.textContent = file.name;
+                        fileName.onclick = () => openDirectory(path, file.name);
+
+                        fileItem.appendChild(fileIcon);
+                        fileItem.appendChild(fileName);
+                    } else {
+                        const fileName = document.createElement('span');
+                        fileName.textContent = file.name;
+
+                        // Check for image or video and create a preview
+                        if (isImage(file.name)) {
+                            fileIcon = createImagePreview(file, path); // Create image preview
+                        } else if (isVideo(file.name)) {
+                            fileIcon = createVideoPreview(file, path); // Create video preview
+                        } else if (file.name.endsWith('.pdf')) {
+                            fileIcon = createPDFPreview(file, path);  // Add this check for PDFs
+                        }
+                        else if (file.name.endsWith('.jar')) {
+                            fileIcon = document.createElement('img');
+                            fileIcon.src = '/lovely/assets/jar.png';
+                            fileIcon.alt = 'JAR File';
+                        } else if (file.name.endsWith('.gz')) {
+                            fileIcon = document.createElement('img');
+                            fileIcon.src = '/lovely/assets/gz.png';
+                            fileIcon.alt = 'GZ File';
+                        } else if (file.name.endsWith('.png')) {
+                            fileIcon = document.createElement('img');
+                            fileIcon.src = '/lovely/assets/png.png';
+                            fileIcon.alt = 'PNG File';
+                        } else if (file.name.endsWith('.zip')) {
+                            fileIcon = document.createElement('img');
+                            fileIcon.src = '/lovely/assets/zip-icon.png';
+                            fileIcon.alt = 'ZIP File';
+                        } else {
+                            fileIcon = document.createElement('img');
+                            fileIcon.src = '/lovely/assets/file.png';
+                            fileIcon.alt = 'File';
+                        }
+                        fileIcon.classList.add('file-icon');
+                        fileItem.appendChild(fileIcon);
+                        fileName.classList.add('file-name');
+                        fileItem.appendChild(fileName);
+                    }
+
+                    const downloadForm = document.createElement('form');
+                    downloadForm.method = 'POST';
+                    downloadForm.action = '/lovely/download';
+                    downloadForm.onsubmit = function () {
+                        const tokenInput = document.createElement('input');
+                        tokenInput.type = 'hidden';
+                        tokenInput.name = 'token';
+                        tokenInput.value = localStorage.getItem('token');
+                        downloadForm.appendChild(tokenInput);
+
+                        showLoadingSpinner(downloadForm);
+
+                        return true;
+                    };
+
+                    const pathInput = document.createElement('input');
+                    pathInput.type = 'hidden';
+                    pathInput.name = 'path';
+                    pathInput.value = path.endsWith('/') ? path + file.name : path + '/' + file.name;
+
+                    const downloadButton = document.createElement('button');
+                    downloadButton.type = 'submit';
+                    downloadButton.classList.add('download-button');
+                    downloadButton.textContent = 'Download';
+
+                    downloadForm.appendChild(pathInput);
+                    downloadForm.appendChild(downloadButton);
+
+                    fileItem.appendChild(downloadForm);
+                    fileList.appendChild(fileItem);
+                } else {
+                    // Remove from map if it already exists to handle removed files
+                    delete existingFileMap[file.name];
+                }
+            });
+
+            // Remove files that no longer exist in the fetched list
+            Object.values(existingFileMap).forEach(item => {
+                fileList.removeChild(item); // Remove old items not in the current list
+            });
+        })
+        .catch(error => {
+            console.error('Error fetching files:', error);
+            if (error.message !== 'Session expired') {
+                alert('Error fetching files. Please try again.');
+            }
+        });
+}
+
+
+
+function createDirectory(directoryName) {
+    const token = localStorage.getItem('token');
+    const currentPath = document.getElementById('path-input').value;
+
+    fetch('/lovely/sftp/create-directory', {
+        method: 'POST',
+        headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            path: currentPath,
+            directoryName: directoryName,
+        }),
+    })
     .then(response => {
-        // If the token is invalid or expired, redirect to login
-        if (response.status === 403) {
-            alert('Session has expired, please log in again.');
-            localStorage.removeItem('token');
-            window.location.href = '/lovely';
-            throw new Error('Session expired');
-        }
         if (!response.ok) {
-            throw new Error('Failed to fetch files');
+            return response.json().then(data => {
+                throw new Error(data.message || 'Error creating directory. Please try again.');
+            });
         }
         return response.json();
     })
-    .then(files => {
-        const fileList = document.getElementById('file-list');
-        const existingItems = Array.from(fileList.children);
-
-        // Compare and update the list without clearing it entirely
-        files.forEach(file => {
-            const existingItem = existingItems.find(item => item.querySelector('span').textContent === file.name);
-
-            if (!existingItem) {
-                const fileItem = document.createElement('li');
-                fileItem.classList.add('directory-item');
-
-                let fileIcon;
-                if (file.type === 'directory') {
-                    fileIcon = document.createElement('img');
-                    fileIcon.src = '/lovely/assets/folder-icon.png';  // Updated path
-                    fileIcon.alt = 'Folder';
-                    fileIcon.classList.add('folder-icon');
-                    fileIcon.onclick = () => openDirectory(path, file.name);
-
-                    const fileName = document.createElement('span');
-                    fileName.classList.add('file-name');
-                    fileName.classList.add('directory');
-                    fileName.textContent = file.name;
-                    fileName.onclick = () => openDirectory(path, file.name);
-
-                    fileItem.appendChild(fileIcon);
-                    fileItem.appendChild(fileName);
-                } else {
-                    const fileName = document.createElement('span');
-                    fileName.textContent = file.name;
-
-                    // Check for image or video and create a preview
-                    if (isImage(file.name)) {
-                        fileIcon = createImagePreview(file, path); // Create image preview
-                    } else if (isVideo(file.name)) {
-                        fileIcon = createVideoPreview(file, path); // Create video preview
-                    } else if (file.name.endsWith('.jar')) {
-                        fileIcon = document.createElement('img');
-                        fileIcon.src = '/lovely/assets/jar.png';
-                        fileIcon.alt = 'JAR File';
-                    } else if (file.name.endsWith('.gz')) {
-                        fileIcon = document.createElement('img');
-                        fileIcon.src = '/lovely/assets/gz.png';
-                        fileIcon.alt = 'GZ File';
-                    } else if (file.name.endsWith('.png')) {
-                        fileIcon = document.createElement('img');
-                        fileIcon.src = '/lovely/assets/png.png';
-                        fileIcon.alt = 'PNG File';
-                    } else if (file.name.endsWith('.zip')) {
-                        fileIcon = document.createElement('img');
-                        fileIcon.src = '/lovely/assets/zip-icon.png';
-                        fileIcon.alt = 'ZIP File';
-                    } else {
-                        fileIcon = document.createElement('img');
-                        fileIcon.src = '/lovely/assets/file.png';
-                        fileIcon.alt = 'File';
-                    }
-                    fileIcon.classList.add('file-icon');
-                    fileItem.appendChild(fileIcon);
-                    fileName.classList.add('file-name');
-                    fileItem.appendChild(fileName);
-                }
-
-                const downloadForm = document.createElement('form');
-                downloadForm.method = 'POST';
-                downloadForm.action = '/lovely/download';
-                downloadForm.onsubmit = function () {
-                    const tokenInput = document.createElement('input');
-                    tokenInput.type = 'hidden';
-                    tokenInput.name = 'token';
-                    tokenInput.value = localStorage.getItem('token');
-                    downloadForm.appendChild(tokenInput);
-
-                    showLoadingSpinner(downloadForm);
-
-                    return true;
-                };
-
-                const pathInput = document.createElement('input');
-                pathInput.type = 'hidden';
-                pathInput.name = 'path';
-                pathInput.value = path.endsWith('/') ? path + file.name : path + '/' + file.name;
-
-                const downloadButton = document.createElement('button');
-                downloadButton.type = 'submit';
-                downloadButton.classList.add('download-button');
-                downloadButton.textContent = 'Download';
-
-                downloadForm.appendChild(pathInput);
-                downloadForm.appendChild(downloadButton);
-
-                fileItem.appendChild(downloadForm);
-                fileList.appendChild(fileItem);
-            }
-        });
-
-        // Remove any items that no longer exist in the current directory
-        existingItems.forEach(item => {
-            const fileName = item.querySelector('span').textContent;
-            if (!files.some(file => file.name === fileName)) {
-                fileList.removeChild(item);
-            }
-        });
+    .then(data => {
+        alert('Directory created successfully');
+        fetchFiles(data.path); // Refresh the file list
     })
     .catch(error => {
-        console.error('Error fetching files:', error);
-        if (error.message !== 'Session expired') {
-            alert('Error fetching files. Please try again.');
+        if (error.message === 'A directory with that name already exists') {
+            alert('A directory with that name already exists. Please choose a different name.');
+        } else {
+            console.error('Error creating directory:', error);
+            alert('Error creating directory. Please try again.');
         }
     });
 }
-
 
 
 
@@ -357,13 +431,13 @@ function changeDirectory() {
         },
         body: JSON.stringify({ path: path })
     })
-    .then(handleFetchResponse)
-    .then(response => response.json())
-    .then(data => fetchFiles(data.path))
-    .catch(error => {
-        console.error('Error changing directory:', error);
-        alert('Error fetching files. Please try again.');
-    });
+        .then(handleFetchResponse)
+        .then(response => response.json())
+        .then(data => fetchFiles(data.path))
+        .catch(error => {
+            console.error('Error changing directory:', error);
+            alert('Error fetching files. Please try again.');
+        });
 }
 
 
@@ -389,21 +463,21 @@ function openDirectory(currentPath, dirName) {
         },
         body: JSON.stringify({ path: newPath })
     })
-    .then(handleFetchResponse)
-    .then(response => response.json())
-    .then(data => {
-        console.log('Directory opened successfully. Fetch response received.');
-        fetchFiles(data.path, false); // Do not push state again when navigating
-    })
-    .catch(error => {
-        console.error('Error opening directory:', error);
-    });
+        .then(handleFetchResponse)
+        .then(response => response.json())
+        .then(data => {
+            console.log('Directory opened successfully. Fetch response received.');
+            fetchFiles(data.path, false); // Do not push state again when navigating
+        })
+        .catch(error => {
+            console.error('Error opening directory:', error);
+        });
 }
 
 
 function throttle(func, limit) {
     let inThrottle;
-    return function(...args) {
+    return function (...args) {
         if (!inThrottle) {
             func.apply(this, args);
             inThrottle = true;
@@ -414,7 +488,7 @@ function throttle(func, limit) {
 
 function debounce(func, delay) {
     let timeout;
-    return function(...args) {
+    return function (...args) {
         clearTimeout(timeout);
         timeout = setTimeout(() => func.apply(this, args), delay);
     };
@@ -447,10 +521,10 @@ function upDirectory() {
         },
         body: JSON.stringify({ path: newPath })
     })
-    .then(handleFetchResponse)
-    .then(response => response.json())
-    .then(data => fetchFiles(data.path, false)) // Do not push state again
-    .catch(error => console.error('Error going up directory:', error));
+        .then(handleFetchResponse)
+        .then(response => response.json())
+        .then(data => fetchFiles(data.path, false)) // Do not push state again
+        .catch(error => console.error('Error going up directory:', error));
 }
 
 
@@ -614,4 +688,25 @@ function createVideoPreview(file, path) {
         .catch(err => console.error('Error fetching video thumbnail:', err));
 
     return videoThumbnail;
+}
+
+function createPDFPreview(file, path) {
+    const pdfThumbnail = document.createElement('img');
+    const filePath = `${path}/${file.name}`;
+
+    fetch(`/lovely/download-preview?path=${encodeURIComponent(filePath)}`, {
+        headers: {
+            'Authorization': 'Bearer ' + localStorage.getItem('token')
+        }
+    })
+        .then(response => response.blob())
+        .then(blob => {
+            const url = URL.createObjectURL(blob);
+            pdfThumbnail.src = url;  // Set the thumbnail image URL
+            pdfThumbnail.classList.add('pdf-thumbnail');  // Add a class for styling
+            pdfThumbnail.alt = `Thumbnail for ${file.name}`;
+        })
+        .catch(err => console.error('Error fetching PDF thumbnail:', err));
+
+    return pdfThumbnail;
 }
