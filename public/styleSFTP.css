@@ -1,0 +1,394 @@
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    overflow-x: hidden; /* Prevent horizontal scroll */
+    box-sizing: border-box;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: inherit;
+}
+
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f9f9f9;
+    color: #333;
+    cursor: url('/lovely/assets/cursor.png'), auto;
+}
+
+header {
+    background-color: #ff69b4; /* Changed to pink */
+    color: #fff;
+    padding: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%; /* Ensure header does not overflow */
+}
+
+header input[type="text"] {
+    width: 50%;
+    padding: 10px;
+    margin-right: 10px;
+    border: 1px solid #ccc;
+    border-radius: 20px; /* Rounded corners */
+    outline: none;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+}
+
+header button {
+    padding: 10px 20px;
+    margin: 0 5px;
+    border: none;
+    border-radius: 20px; /* Match the rounding effect */
+    background-color: #ff69b4; /* Changed to pink */
+    color: #fff;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    transition: background-color 0.3s ease;
+}
+
+header button:hover {
+    background-color: #ff1493; /* Darker pink on hover */
+}
+
+/* Logout button specific styles */
+#logout-button {
+    background-color: #df2720;
+}
+
+#logout-button:hover {
+    background-color: #a5231f;
+}
+#create-directory-button {
+    background-color: #7c11d3; /* Aqua color */
+    color: #fff;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    transition: background-color 0.3s ease;
+}
+
+#create-directory-button:hover {
+    background-color: #7214b1; /* Darker aqua color on hover */
+}
+
+
+.content {
+    padding: 20px;
+    overflow: hidden; /* Ensure content does not overflow */
+}
+
+h1 {
+    font-size: 48px;
+    color: #ff69b4; /* Changed to pink */
+    cursor: url('/lovely/assets/hover.png'), pointer; /* Change cursor to pointer on hover */
+}
+h1:hover {
+    text-decoration: underline; /* Optional: underline on hover to indicate it's clickable */
+}
+
+ul {
+    list-style-type: none;
+    padding: 0;
+    margin: 0; /* Remove default margins */
+}
+
+li {
+    margin: 10px 0;
+    padding: 15px;
+    background-color: #fff;
+    border-radius: 20px; /* Rounded corners for the containers */
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* New styles for directory items and folder icons */
+.directory-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+}
+
+.folder-icon {
+    width: 128px; /* Adjusted the size as needed */
+    height: 128px; /* Adjusted the size as needed */
+    margin-right: 10px; /* Space between icon and name */
+    cursor: url('/lovely/assets/hover.png'), pointer; /* Change cursor to pointer on hover */
+}
+.folder-icon:hover {
+    cursor: url('/lovely/assets/hover.png'), pointer; /* Ensure cursor changes to pointer */
+}
+.file-icon {
+    width: 128px; /* Adjusted the size as needed */
+    height: 128px; /* Adjusted the size as needed */
+    margin-right: 10px; /* Space between icon and name */
+}
+
+.directory {
+    color: #ff69b4; /* Changed to pink */
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    text-decoration: none;
+    font-size: 24px; /* Increase font size */
+    font-weight: bold; /* Make the directory name bold */
+}
+.file-name
+{
+    font-size: 24px; /* Increase font size */
+    font-weight: bold; /* Make the directory name bold */
+    
+}
+.loading-message {
+    margin-left: 10px; /* Space between spinner and message */
+    color: #666;
+    font-size: 14px;
+    font-style: italic;
+    text-align: center;
+}
+
+.directory:hover{
+    text-decoration: underline;
+}
+
+.directory-name, .file-name {
+    flex-grow: 1; /* Ensures the name takes up remaining space */
+}
+
+.upload-section {
+    padding: 20px;
+    background-color: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    border-radius: 20px; /* Rounded corners for the upload section */
+    margin: 20px;
+    text-align: center;
+}
+
+.upload-section form {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+
+.upload-section button {
+    padding: 15px 30px; /* Increase padding for larger size */
+    font-size: 18px; /* Increase font size */
+    border: none;
+    border-radius: 20px; /* Match the rounding effect */
+    background-color: #ff69b4; /* Changed to pink */
+    color: #fff;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    transition: background-color 0.3s ease;
+}
+
+.upload-section button:hover {
+    background-color: #ff1493; /* Darker pink on hover */
+}
+.image-preview {
+    width: 100px;
+    height: 100px;
+    object-fit: cover;
+    margin-right: 10px;
+    border-radius: 20px; /* Add rounded corners for image previews */
+}
+
+.video-thumbnail {
+    width: 150px;
+    height: 100px;
+    object-fit: cover;
+    margin-right: 10px;
+    border-radius: 20px; /* Add rounded corners for video previews */
+}
+
+.pdf-thumbnail {
+    width: 100px; /* Set a narrower width for a vertical look */
+    height: 150px; /* Make it taller than it is wide */
+    object-fit: cover; /* Ensure the content fits the container */
+    margin-right: 10px;
+    border-radius: 20px; /* Add rounded corners for PDF thumbnails */
+}
+
+
+/* Specific styles for the Go button */
+#go-button {
+    background-color: #1cbeb6; /* Aqua color */
+    color: #fff;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    transition: background-color 0.3s ease;
+}
+
+#go-button:hover {
+    background-color: #1c8f89; /* Darker aqua color on hover */
+}
+
+#progress-container {
+    width: 80%;
+    margin: 0 auto;
+    text-align: center;
+}
+
+progress {
+    width: 100%;
+    height: 20px;
+    -webkit-appearance: none;
+    appearance: none;
+    border-radius: 20px; /* Rounded corners */
+}
+
+progress::-webkit-progress-bar {
+    background-color: #f3f3f3;
+    border-radius: 20px;
+}
+
+progress::-webkit-progress-value {
+    background-color: #ff69b4; /* Changed to pink */
+    border-radius: 20px; /* Rounded corners */
+    transition: width 0.4s ease; /* Smooth transition effect */
+}
+
+.spinner {
+    border: 4px solid rgba(0, 0, 0, 0.1);
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border-left-color: #ff69b4; /* Changed to pink */
+    animation: spin 1s linear infinite;
+    display: inline-block;
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+    body {
+        background-color: #121212;
+        color: #e0e0e0;
+    }
+
+    header input[type="text"] {
+        background-color: #333;
+        color: #e0e0e0;
+        border: 1px solid #555;
+    }
+
+    /* Logout button specific styles for dark mode */
+    #logout-button {
+        background-color: #df2720;
+    }
+
+    #logout-button:hover {
+        background-color: #a5231f;
+    }
+
+    h1 {
+        color: #ff69b4; /* Changed to pink */
+    }
+
+    li {
+        background-color: #333;
+        box-shadow: 0 1px 3px rgba(255, 255, 255, 0.1);
+    }
+
+    .directory{
+        color: #ff69b4; /* Changed to pink */
+        font-weight: bold; /* Ensure the bold font in dark mode too */
+    }
+
+    .upload-section {
+        background-color: #333;
+        box-shadow: 0 1px 3px rgba(255, 255, 255, 0.1);
+    }
+
+    .upload-section button {
+        background-color: #ff69b4; /* Changed to pink */
+    }
+
+    .upload-section button:hover {
+        background-color: #ff1493; /* Darker pink on hover */
+    }
+
+    progress::-webkit-progress-bar {
+        background-color: #444;
+    }
+
+    progress::-webkit-progress-value {
+        background-color: #ff69b4; /* Changed to pink */
+    }
+
+    .spinner {
+        border-left-color: #ff69b4; /* Changed to pink */
+    }
+}
+
+/* Mobile styles */
+@media (max-width: 768px) {
+    header {
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 10px;
+    }
+
+    header input[type="text"] {
+        width: 100%;
+        margin: 5px 0;
+    }
+
+    header button {
+        width: 100%;
+        margin: 5px 0;
+    }
+
+    .content {
+        padding: 10px;
+    }
+
+    h1 {
+        font-size: 20px;
+        text-align: center; /* Center the h1 text */
+        width: 100%;
+    }
+
+    li {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .upload-section {
+        padding: 10px;
+        margin: 10px 0;
+    }
+
+    .upload-section button {
+        width: 100%;
+        padding: 10px;
+        font-size: 16px;
+    }
+
+    #progress-container {
+        width: 100%;
+    }
+
+    .directory, .file-name {
+        font-size: 18px; /* Increase font size */
+    }
+}
+
+/* Mobile dark mode with pure black background */
+@media (prefers-color-scheme: dark) and (max-width: 768px) {
+    body {
+        background-color: #000000; /* Pure black background for mobile dark mode */
+    }
+    .loading-message {
+        color: #bbb; /* Lighter shade for dark mode */
+    }
+}

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TheLongIslander and Slaygirl's Lovely Webserver</title>
+    <link rel="stylesheet" href="/lovely/styleSFTP.css"> <!-- Updated path for the CSS -->
+    <link rel="icon" type="image/x-icon" href="/lovely/assets/favicon.ico"> <!-- Updated path for the favicon -->
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+    <header>
+        <input type="text" id="path-input" placeholder="Enter path here..." value="/">
+        <button id="go-button" onclick="changeDirectory()">Go</button>
+      <button id="create-directory-button">Create Directory</button>
+        <button id="logout-button">Logout</button>
+    </header>
+    <div class="content">
+        <h1 onclick="goToRoot()">TheLongIslander and Slaygirl's Lovely Webserver</h1>
+        <ul id="file-list"></ul>
+    </div>
+    <div class="upload-section">
+        <form id="upload-form" enctype="multipart/form-data">
+            <input type="file" id="file-input" name="file" style="display:none;" multiple>
+            <button type="button" id="upload-button">Upload</button>
+            <div id="progress-container" style="display:none;">
+                <progress id="upload-progress" value="0" max="100" style="width: 80%;"></progress>
+                <div id="upload-percentage" style="text-align:center; margin-top:5px;"></div>
+            </div>
+        </form>
+    </div>
+    <div id="loading-spinner" class="spinner" style="display:none;"></div>
+
+    <!-- Updated path for the JS file -->
+    <script src="/lovely/sftp.js"></script> 
+</body>
+</html>

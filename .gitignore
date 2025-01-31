@@ -1,0 +1,14 @@
+# Ignore bcrypt.js file
+bcrypt.js
+
+# Ignore the entire login_start directory
+login_start/
+
+# Ignore environment variables
+.env
+
+token_blacklist.db
+
+server_logs.db
+
+sftp_activity_log.db

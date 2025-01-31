@@ -1,0 +1,119 @@
+/* Light mode styles (default) */
+body {
+    font-family: 'Arial', sans-serif;
+    background-color: #f4f4f4;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    flex-direction: column;
+    color: #333; /* Ensuring text color is set for light mode */
+    cursor: url('/lovely/assets/cursor.png'), auto;
+}
+
+h2 {
+    color: #333;
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+form {
+    background: #fff;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    text-align: center;
+}
+
+label {
+    display: block;
+    margin-top: 10px;
+    font-size: 1rem;
+    color: #666;
+    cursor: url('/lovely/assets/cursor.png'), auto;
+}
+
+input[type="text"],
+input[type="password"] {
+    width: 100%;
+    padding: 10px;
+    margin-top: 5px;
+    margin-bottom: 20px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    box-sizing: border-box;
+    background: #fff; /* Explicitly setting background for inputs */
+    color: #333; /* Text color for inputs */
+    cursor: url('/lovely/assets/hover.png'), pointer;
+}
+
+button {
+    background-color: #ff69b4; /* Pink */
+    color: white;
+    padding: 10px 15px;
+    border: none;
+    border-radius: 5px;
+    cursor: url('/lovely/assets/hover.png'), pointer;
+    font-size: 1rem;
+    transition: background-color 0.3s;
+    
+}
+
+button:hover {
+    background-color: #ff1493; /* Darker pink on hover */
+}
+
+/* Dark mode styles */
+@media (prefers-color-scheme: dark) {
+    body {
+        background-color: #121212;
+        color: #ccc;
+    }
+
+    h2 {
+        color: #ccc;
+    }
+
+    form {
+        background: #333;
+        color: #ccc;
+    }
+
+    label {
+        color: #aaa; /* Slightly lighter color for labels */
+    }
+
+    input[type="text"],
+    input[type="password"] {
+        background: #222;
+        color: #ccc;
+        border-color: #555;
+    }   
+}
+
+/* Responsive adjustments for screens less than 768px wide */
+@media (max-width: 768px) {
+    form {
+        padding: 10px;
+        width: 90%; /* Make form take up most of the screen */
+    }
+
+    input[type="text"],
+    input[type="password"] {
+        padding: 12px; /* Larger padding for easier interaction */
+        margin-top: 10px;
+        margin-bottom: 10px;
+    }
+
+    button {
+        padding: 12px 24px;
+        font-size: 1rem; /* Slightly larger font size for readability */
+        width: 100%; /* Easier to tap */
+    }
+
+    label {
+        margin-bottom: 5px; /* Tighten up spacing */
+    }
+}
