@@ -1,3 +1,59 @@
+let ws;
+let reconnectAttempts = 0;
+const MAX_RETRIES = 10;
+
+function setupWebSocket() {
+    if (reconnectAttempts >= MAX_RETRIES) {
+        console.error('[DEBUG] Max WebSocket reconnect attempts reached.');
+        return;
+    }
+
+    ws = new WebSocket('wss://' + window.location.host);
+
+    ws.onopen = function () {
+        console.log('[DEBUG] WebSocket connected.');
+        reconnectAttempts = 0;
+    };
+
+    ws.onmessage = function (event) {
+        console.log(`[DEBUG] WebSocket message received: ${event.data}`);
+
+        try {
+            const message = JSON.parse(event.data);
+
+            if (message.type === 'progress') {
+                console.log(`[DEBUG] Progress update received: ${message.value}% for Request ID: ${message.requestId}`);
+                console.log(`[DEBUG] WebSocket progress update received: ${message.value}% for Request ID: ${message.requestId}`);
+                updateZipProgress(message.requestId, message.value);
+
+            } else if (message.type === 'complete') {
+                console.log(`[DEBUG] Download complete for Request ID: ${message.requestId}`);
+                updateZipProgress(message.requestId, 100);
+            } else {
+                console.warn(`[DEBUG] Unknown WebSocket message type: ${message.type}`);
+            }
+        } catch (error) {
+            console.error(`[ERROR] Failed to parse WebSocket message: ${error.message}`, event.data);
+        }
+    };
+
+    ws.onclose = function (e) {
+        console.error(`[DEBUG] WebSocket closed (code: ${e.code}, reason: ${e.reason}). Attempting to reconnect.`);
+        reconnectAttempts++;
+        setTimeout(setupWebSocket, 1000);
+    };
+
+    ws.onerror = function (err) {
+        console.error(`[DEBUG] WebSocket error: ${err.message}`);
+        ws.close();
+    };
+}
+
+// Ensure WebSocket starts on page load
+setupWebSocket();
+
+
+
 // Listen for popstate event to handle back/forward browser navigation
 // Listen for popstate event to handle back/forward browser navigation
 window.addEventListener('popstate', throttle(function (event) {
@@ -15,6 +71,9 @@ let typingInProgress = false;  // Declare at global scope
 
 document.addEventListener('DOMContentLoaded', function () {
     fetchFiles('/');
+
+    // Initialize WebSocket inside DOMContentLoaded
+    setupWebSocket();
 
     const logoutButton = document.getElementById('logout-button');
     logoutButton.addEventListener('click', function () {
@@ -67,6 +126,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Detect user activity
     detectUserActivity();
 });
+
 
 let activityTimeout;
 let refreshInterval;
@@ -232,16 +292,28 @@ function fetchFiles(path, shouldPushState = true, forceUpdate = false) {
                     downloadForm.method = 'POST';
                     downloadForm.action = '/lovely/download';
                     downloadForm.onsubmit = function () {
+                        const requestId = generateUniqueId();
+                        downloadForm.dataset.requestId = requestId;
+                        console.log(`[DEBUG] Download started. Request ID: ${requestId}`);
+
+                        const requestIdInput = document.createElement('input');
+                        requestIdInput.type = 'hidden';
+                        requestIdInput.name = 'requestId';
+                        requestIdInput.value = requestId;
+                        downloadForm.appendChild(requestIdInput);
+
+                        showLoadingSpinner(downloadForm, requestId);
+
                         const tokenInput = document.createElement('input');
                         tokenInput.type = 'hidden';
                         tokenInput.name = 'token';
                         tokenInput.value = localStorage.getItem('token');
                         downloadForm.appendChild(tokenInput);
 
-                        showLoadingSpinner(downloadForm);
-
-                        return true;
+                        return true;  // Continue with form submission
                     };
+
+
 
                     const pathInput = document.createElement('input');
                     pathInput.type = 'hidden';
@@ -294,68 +366,80 @@ function createDirectory(directoryName) {
             directoryName: directoryName,
         }),
     })
-    .then(response => {
-        if (!response.ok) {
-            return response.json().then(data => {
-                throw new Error(data.message || 'Error creating directory. Please try again.');
-            });
-        }
-        return response.json();
-    })
-    .then(data => {
-        alert('Directory created successfully');
-        fetchFiles(data.path); // Refresh the file list
-    })
-    .catch(error => {
-        if (error.message === 'A directory with that name already exists') {
-            alert('A directory with that name already exists. Please choose a different name.');
-        } else {
-            console.error('Error creating directory:', error);
-            alert('Error creating directory. Please try again.');
-        }
-    });
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(data => {
+                    throw new Error(data.message || 'Error creating directory. Please try again.');
+                });
+            }
+            return response.json();
+        })
+        .then(data => {
+            alert('Directory created successfully');
+            fetchFiles(data.path); // Refresh the file list
+        })
+        .catch(error => {
+            if (error.message === 'A directory with that name already exists') {
+                alert('A directory with that name already exists. Please choose a different name.');
+            } else {
+                console.error('Error creating directory:', error);
+                alert('Error creating directory. Please try again.');
+            }
+        });
 }
 
 
 
 
-function showLoadingSpinner(form) {
+function showLoadingSpinner(form, requestId) {
     const downloadButton = form.querySelector('.download-button');
     downloadButton.style.display = 'none';
 
-    // Create spinner
-    const spinner = document.createElement('div');
-    spinner.classList.add('spinner');
+    // Create progress bar (if not already present)
+    let progressBar = form.querySelector('.zip-progress-bar');
+    if (!progressBar) {
+        progressBar = document.createElement('progress');
+        progressBar.classList.add('zip-progress-bar');
+        progressBar.value = 0;
+        progressBar.max = 100;
+        progressBar.style.display = 'block';
+        progressBar.style.width = '100%'; // Ensures full width
+        progressBar.style.height = '10px'; // Sets a proper height
+        form.appendChild(progressBar);
+    }
 
-    // Create the loading message
-    const loadingMessage = document.createElement('div');
-    loadingMessage.classList.add('loading-message');
-    loadingMessage.textContent = 'This may take a minute! Please wait till the download starts!';
+    // Create spinner (if not already present)
+    let spinner = form.querySelector('.spinner');
+    if (!spinner) {
+        spinner = document.createElement('div');
+        spinner.classList.add('spinner');
+        form.appendChild(spinner);
+    }
 
-    // Append spinner and message to the form
-    form.appendChild(spinner);
-    form.appendChild(loadingMessage);
+    // Store the requestId for tracking progress updates
+    form.dataset.requestId = requestId;
 }
 
 
-function hideLoadingSpinner() {
-    const spinners = document.querySelectorAll('.spinner');
-    spinners.forEach(spinner => {
-        const form = spinner.parentElement;
+
+
+function hideLoadingSpinner(form) {
+    const progressBar = form.querySelector('.zip-progress-bar');
+    if (progressBar) {
+        progressBar.remove();
+    }
+
+    const spinner = form.querySelector('.spinner');
+    if (spinner) {
         spinner.remove();
+    }
 
-        // Remove the loading message as well
-        const loadingMessage = form.querySelector('.loading-message');
-        if (loadingMessage) {
-            loadingMessage.remove();
-        }
-
-        const downloadButton = form.querySelector('.download-button');
-        if (downloadButton) {
-            downloadButton.style.display = 'inline-block';
-        }
-    });
+    const downloadButton = form.querySelector('.download-button');
+    if (downloadButton) {
+        downloadButton.style.display = 'inline-block';
+    }
 }
+
 
 
 window.addEventListener('message', function (event) {
@@ -710,3 +794,42 @@ function createPDFPreview(file, path) {
 
     return pdfThumbnail;
 }
+function updateZipProgress(requestId, progress) {
+    console.log(`[DEBUG] Received progress update: ${progress}% for Request ID: ${requestId}`);
+
+    const forms = document.querySelectorAll('form');
+
+    let formFound = false;  // Debug tracking
+
+    forms.forEach(form => {
+        if (form.dataset.requestId === requestId) {
+            formFound = true;
+
+            let progressBar = form.querySelector('.zip-progress-bar');
+            let spinner = form.querySelector('.spinner');
+
+            if (!progressBar) {
+                console.warn(`[DEBUG] No progress bar found for Request ID: ${requestId}`);
+                return;
+            }
+
+            progressBar.value = progress;
+            progressBar.style.display = 'block';
+
+            console.log(`[DEBUG] Progress updated to ${progress}% for Request ID: ${requestId}`);
+
+            if (progress >= 100) {
+                console.log(`[DEBUG] Hiding spinner for Request ID: ${requestId}`);
+                hideLoadingSpinner(form);
+            }
+        }
+    });
+
+    if (!formFound) {
+        console.warn(`[DEBUG] No matching form found for Request ID: ${requestId}`);
+    }
+}
+
+
+
+

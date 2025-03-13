@@ -1,5 +1,5 @@
 # Ignore bcrypt.js file
-bcrypt.js
+bycrypt.js
 
 # Ignore the entire login_start directory
 login_start/
@@ -12,3 +12,9 @@ token_blacklist.db
 server_logs.db
 
 sftp_activity_log.db
+
+# Ignore all hidden files
+.*
+
+# But don't ignore .gitignore itself
+!.gitignore

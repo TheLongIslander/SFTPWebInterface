@@ -95,10 +95,10 @@ const db = new sqlite3.Database('./token_blacklist.db', sqlite3.OPEN_READWRITE |
 
 const sftpStat = (sftp, filePath) => {
   return new Promise((resolve, reject) => {
-      sftp.stat(filePath, (err, stats) => {
-          if (err) reject(err);
-          else resolve(stats);
-      });
+    sftp.stat(filePath, (err, stats) => {
+      if (err) reject(err);
+      else resolve(stats);
+    });
   });
 };
 const sftpReadStream = (sftp, filePath) => {
@@ -177,34 +177,34 @@ app.get('/lovely/sftp/list', authenticateJWT, (req, res) => {
 
   const conn = new Client();
   conn.on('ready', () => {
-      conn.sftp((err, sftp) => {
-          if (err) {
-              console.error('SFTP session error:', err);
-              res.status(500).send('Failed to start SFTP session');
-              return;
-          }
+    conn.sftp((err, sftp) => {
+      if (err) {
+        console.error('SFTP session error:', err);
+        res.status(500).send('Failed to start SFTP session');
+        return;
+      }
 
-          sftp.readdir(dirPath, (err, list) => {
-              if (err) {
-                  console.error('Directory read error:', err);
-                  res.status(500).send('Failed to read directory');
-                  return;
-              }
-              const filteredList = list.filter(item => !item.filename.startsWith('.'));
-              // Sort the list by modification time (mtime)
-              filteredList.sort((a, b) => b.attrs.mtime - a.attrs.mtime);
-              res.json(filteredList.map(item => ({
-                  name: item.filename,
-                  type: item.longname[0] === 'd' ? 'directory' : 'file',
-                  size: item.attrs.size,
-                  modified: item.attrs.mtime * 1000 // Convert to milliseconds
-              })));
-              conn.end();
-          });
+      sftp.readdir(dirPath, (err, list) => {
+        if (err) {
+          console.error('Directory read error:', err);
+          res.status(500).send('Failed to read directory');
+          return;
+        }
+        const filteredList = list.filter(item => !item.filename.startsWith('.'));
+        // Sort the list by modification time (mtime)
+        filteredList.sort((a, b) => b.attrs.mtime - a.attrs.mtime);
+        res.json(filteredList.map(item => ({
+          name: item.filename,
+          type: item.longname[0] === 'd' ? 'directory' : 'file',
+          size: item.attrs.size,
+          modified: item.attrs.mtime * 1000 // Convert to milliseconds
+        })));
+        conn.end();
       });
+    });
   }).on('error', (err) => {
-      console.error('Connection error:', err);
-      res.status(500).send('Failed to connect to SFTP server');
+    console.error('Connection error:', err);
+    res.status(500).send('Failed to connect to SFTP server');
   }).connect(sftpConnectionDetails);
 });
 
@@ -233,7 +233,10 @@ app.post('/lovely/download', (req, res) => {
   const token = req.body.token;
   const filePath = req.body.path;
   const filename = path.basename(filePath);
-  const localPath = path.join(os.tmpdir(), filename); // Local path to save the directory
+  const localPath = path.join(os.tmpdir(), filename);
+  const zipFilePath = path.join(os.tmpdir(), `${filename}.zip`);
+  const requestId = req.body.requestId || generateUniqueId();
+
   const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.socket.remoteAddress || req.connection.socket.remoteAddress;
   const formattedIpAddress = ipAddress.startsWith('::ffff:') ? ipAddress.replace('::ffff:', '') : (ipAddress === '::1' ? '127.0.0.1' : ipAddress);
 
@@ -262,53 +265,129 @@ app.post('/lovely/download', (req, res) => {
           if (stats.isDirectory()) {
             console.log(`Downloading directory: ${filePath}`);
 
-            // Ensure the localPath exists
+            // Ensure old extracted directory is deleted before re-downloading
+            if (fs.existsSync(localPath)) {
+              console.log(`Deleting old extracted directory: ${localPath}`);
+              fs.rmSync(localPath, { recursive: true, force: true });
+            }
+
             await fsPromises.mkdir(localPath, { recursive: true });
 
-            // Download the directory to localPath
-            await downloadDirectory(sftp, filePath, localPath);
+            const totalSize = await getTotalSize(sftp, filePath);
+            let downloadedSize = 0;
 
-            // Remove any existing zip files in the directory to avoid redundancy
-            const filesInDir = await fsPromises.readdir(localPath);
-            for (const file of filesInDir) {
-              if (file.endsWith('.zip')) {
-                console.log(`Removing redundant zip file: ${file}`);
-                await fsPromises.unlink(path.join(localPath, file));
+            async function downloadWithProgress(sftp, remotePath, localPath) {
+              await fsPromises.mkdir(localPath, { recursive: true });
+
+              const items = await new Promise((resolve, reject) => {
+                sftp.readdir(remotePath, (err, list) => {
+                  if (err) reject(err);
+                  else resolve(list);
+                });
+              });
+
+              for (const item of items) {
+                const remoteItemPath = path.join(remotePath, item.filename);
+                const localItemPath = path.join(localPath, item.filename);
+
+                if (item.longname.startsWith('d')) {
+                  await downloadWithProgress(sftp, remoteItemPath, localItemPath);
+                } else {
+                  await new Promise((resolve, reject) => {
+                    sftp.fastGet(remoteItemPath, localItemPath, (err) => {
+                      if (err) reject(err);
+                      else resolve();
+                    });
+                  });
+
+                  downloadedSize += item.attrs.size;
+                  const progress = Math.min((downloadedSize / totalSize) * 100, 100);
+                  console.log(`[DEBUG] Broadcasting progress ${progress}% for Request ID: ${requestId}`);
+                  broadcastProgress(requestId, progress);
+                  
+                }
               }
             }
 
-            res.setHeader('Content-Disposition', `attachment; filename=${filename}.zip`);
-            res.setHeader('Content-Type', 'application/zip');
+            await downloadWithProgress(sftp, filePath, localPath);
+            console.log(`Directory download complete: ${filePath}`);
 
-            const zipProcess = spawn('zip', ['-r', '-', '.'], {
-              cwd: localPath, // Use the directory as the working directory
-            });
+            let totalFiles = 1;
+            try {
+              const stdout = execSync(`find "${localPath}" -type f | wc -l`).toString().trim();
+              totalFiles = parseInt(stdout, 10) || 1;
+              console.log(`Total files to zip: ${totalFiles}`);
+            } catch (err) {
+              console.error("Error counting files:", err);
+              totalFiles = 1;
+            }
 
-            zipProcess.stdout.pipe(res); // Stream ZIP output to the response
+            console.log(`Starting ZIP compression for: ${localPath}`);
 
-            zipProcess.stderr.on('data', (data) => {
-              console.error(`ZIP Error: ${data}`);
-            });
+            // Ensure old ZIP file is deleted before creating a new one
+            if (fs.existsSync(zipFilePath)) {
+              console.log(`Deleting old ZIP file: ${zipFilePath}`);
+              fs.unlinkSync(zipFilePath);
+            }
 
-            zipProcess.on('close', (code) => {
-              if (code !== 0) {
-                console.error(`ZIP process exited with code ${code}`);
-                if (!res.headersSent) {
-                  res.status(500).send('Error creating ZIP file');
+            await new Promise((resolve, reject) => {
+              const zipProcess = spawn('stdbuf', ['-oL', 'zip', '-r', zipFilePath, '.'], { cwd: localPath });
+
+              let zippedFiles = 0;
+              zipProcess.stdout.setEncoding('utf8');
+              zipProcess.stdout.on('data', (data) => {
+                process.stdout.write(data);
+
+                const matches = data.match(/adding: ([^ ]+)/g);
+                if (matches) {
+                  zippedFiles += matches.length;
                 }
-              } else {
-                console.log(`ZIP file streamed successfully for ${filePath}`);
-                logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
-                exec(`rm -rf "${localPath}"`); // Clean up after streaming
+
+                const progress = totalFiles > 0 ? Math.min((zippedFiles / totalFiles) * 100, 100) : 100;
+                console.log(`[ZIP PROGRESS] ${progress.toFixed(2)}% (${zippedFiles}/${totalFiles} files)`);
+                
+                console.log(`[DEBUG] Broadcasting progress ${progress}% for Request ID: ${requestId}`);
+                broadcastProgress(requestId, progress);
+                
+              });
+
+              zipProcess.on('close', (code) => {
+                if (code !== 0) {
+                  reject(new Error(`ZIP process exited with code ${code}`));
+                } else {
+                  resolve();
+                }
+              });
+
+              zipProcess.on('error', (err) => {
+                reject(err);
+              });
+            });
+
+            console.log(`ZIP file created: ${zipFilePath}`);
+
+            if (!res.headersSent) {
+              res.setHeader('Content-Disposition', `attachment; filename="${filename}.zip"`);
+              res.setHeader('Content-Type', 'application/zip');
+            }
+
+            const fileStream = fs.createReadStream(zipFilePath);
+            fileStream.pipe(res);
+
+            fileStream.on('close', () => {
+              console.log(`ZIP file streamed successfully for ${filePath}`);
+              logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
+              exec(`rm -rf "${localPath}" && rm -f "${zipFilePath}"`);
+              broadcastProgress(requestId, 100);
+            });
+
+            fileStream.on('error', (error) => {
+              console.error('Error streaming ZIP file:', error);
+              if (!res.headersSent) {
+                res.status(500).send('Error streaming ZIP file');
               }
             });
 
-            zipProcess.on('error', (error) => {
-              console.error('Error with ZIP process:', error);
-              if (!res.headersSent) {
-                res.status(500).send('Error creating ZIP file');
-              }
-            });
           } else {
             console.log(`Downloading file: ${filePath}`);
 
@@ -319,23 +398,25 @@ app.post('/lovely/download', (req, res) => {
               });
             });
 
-            res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
-            res.setHeader('Content-Type', 'application/octet-stream');
+            if (!res.headersSent) {
+              res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+              res.setHeader('Content-Type', 'application/octet-stream');
+            }
 
             const fileStream = fs.createReadStream(localPath);
             fileStream.pipe(res);
+
+            fileStream.on('close', () => {
+              console.log(`File ${filePath} successfully downloaded by ${user.username}`);
+              logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
+              exec(`rm -rf "${localPath}"`);
+            });
 
             fileStream.on('error', (error) => {
               console.error('Error reading file:', error);
               if (!res.headersSent) {
                 res.status(500).send('Error reading file');
               }
-            });
-
-            fileStream.on('close', () => {
-              console.log(`File ${filePath} successfully downloaded by ${user.username}`);
-              logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
-              exec(`rm -rf "${localPath}"`);
             });
           }
         } catch (error) {
@@ -351,6 +432,64 @@ app.post('/lovely/download', (req, res) => {
     }).connect(sftpConnectionDetails);
   });
 });
+
+
+
+
+
+
+async function getTotalSize(sftp, dirPath) {
+  let totalSize = 0;
+  const items = await new Promise((resolve, reject) => {
+    sftp.readdir(dirPath, (err, list) => {
+      if (err) reject(err);
+      else resolve(list);
+    });
+  });
+
+  for (const item of items) {
+    const remoteItemPath = path.join(dirPath, item.filename);
+    const stats = await sftpStat(sftp, remoteItemPath);
+    if (stats.isDirectory()) {
+      totalSize += await getTotalSize(sftp, remoteItemPath);
+    } else {
+      totalSize += stats.size;
+    }
+  }
+
+  return totalSize;
+}
+
+function broadcastProgress(requestId, progress) {
+  if (!requestId) {
+      console.error("[ERROR] broadcastProgress called without a valid requestId");
+      return;
+  }
+
+  if (!wss || !wss.clients) {
+      console.error("[ERROR] WebSocket Server is not initialized yet.");
+      return;
+  }
+
+  console.log(`[DEBUG] Broadcasting progress ${progress}% for Request ID: ${requestId}`);
+
+  wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+          console.log(`[DEBUG] Sending progress update: ${progress}% to WebSocket client`);
+          client.send(JSON.stringify({ type: 'progress', requestId, value: progress }));
+      }
+  });
+}
+
+
+
+function generateUniqueId() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = Math.random() * 16 | 0,
+      v = c === 'x' ? r : (c === 'y' ? (r & 0x3 | 0x8) : r);
+    return v.toString(16);
+  });
+}
 
 
 
@@ -426,102 +565,102 @@ app.post('/lovely/upload', authenticateJWT, (req, res) => {
 
   const conn = new Client();
   conn.on('ready', () => {
-      conn.sftp(async (err, sftp) => {
-          if (err) {
-              console.error('SFTP connection error:', err);
-              res.status(500).send('SFTP connection error: ' + err.message);
-              return;
+    conn.sftp(async (err, sftp) => {
+      if (err) {
+        console.error('SFTP connection error:', err);
+        res.status(500).send('SFTP connection error: ' + err.message);
+        return;
+      }
+
+      try {
+        if (!Array.isArray(files)) {
+          files = [files]; // Ensure it's an array
+        }
+
+        for (const file of files) {
+          let localFilePath = file.tempFilePath || file.path;
+          console.log('Processing file:', file.name);
+          console.log('Local file path:', localFilePath);
+
+          if (!localFilePath) {
+            throw new Error('Local file path is undefined for file: ' + file.name);
           }
 
-          try {
-              if (!Array.isArray(files)) {
-                  files = [files]; // Ensure it's an array
-              }
+          let relativeFilePath = file.name;
+          let remoteFilePath = path.join(destinationPath, relativeFilePath);
 
-              for (const file of files) {
-                  let localFilePath = file.tempFilePath || file.path;
-                  console.log('Processing file:', file.name);
-                  console.log('Local file path:', localFilePath);
+          // Ensure the remote directory exists
+          const remoteDir = path.dirname(remoteFilePath);
+          await ensureDirectoryExists(sftp, remoteDir);
 
-                  if (!localFilePath) {
-                      throw new Error('Local file path is undefined for file: ' + file.name);
-                  }
+          // Check if the file exists and modify the file name if necessary
+          remoteFilePath = await getUniqueFilePath(sftp, remoteFilePath);
 
-                  let relativeFilePath = file.name;
-                  let remoteFilePath = path.join(destinationPath, relativeFilePath);
+          console.log(`Uploading ${localFilePath} to ${remoteFilePath}`);
 
-                  // Ensure the remote directory exists
-                  const remoteDir = path.dirname(remoteFilePath);
-                  await ensureDirectoryExists(sftp, remoteDir);
+          // Upload the file
+          await new Promise((resolve, reject) => {
+            sftp.fastPut(localFilePath, remoteFilePath, (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          });
 
-                  // Check if the file exists and modify the file name if necessary
-                  remoteFilePath = await getUniqueFilePath(sftp, remoteFilePath);
+          // Set the modification and access times on the remote file using lastModified
+          const modifiedDate = new Date(lastModified);
+          await new Promise((resolve, reject) => {
+            sftp.utimes(remoteFilePath, modifiedDate, modifiedDate, (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          });
 
-                  console.log(`Uploading ${localFilePath} to ${remoteFilePath}`);
+          console.log(`Uploaded ${file.name} with original metadata`);
 
-                  // Upload the file
-                  await new Promise((resolve, reject) => {
-                      sftp.fastPut(localFilePath, remoteFilePath, (err) => {
-                          if (err) reject(err);
-                          else resolve();
-                      });
-                  });
+          // If the file is a ZIP file, unzip it into a new directory
+          if (path.extname(file.name) === '.zip') {
+            let baseName = path.basename(file.name, '.zip');
+            let tempDir = path.join(os.tmpdir(), baseName);
+            let newDir = path.join(destinationPath, baseName);
 
-                  // Set the modification and access times on the remote file using lastModified
-                  const modifiedDate = new Date(lastModified);
-                  await new Promise((resolve, reject) => {
-                      sftp.utimes(remoteFilePath, modifiedDate, modifiedDate, (err) => {
-                          if (err) reject(err);
-                          else resolve();
-                      });
-                  });
+            // Ensure the directory does not overwrite an existing one
+            newDir = await getUniqueDirectoryPath(sftp, newDir);
 
-                  console.log(`Uploaded ${file.name} with original metadata`);
-
-                  // If the file is a ZIP file, unzip it into a new directory
-                  if (path.extname(file.name) === '.zip') {
-                      let baseName = path.basename(file.name, '.zip');
-                      let tempDir = path.join(os.tmpdir(), baseName);
-                      let newDir = path.join(destinationPath, baseName);
-
-                      // Ensure the directory does not overwrite an existing one
-                      newDir = await getUniqueDirectoryPath(sftp, newDir);
-
-                      fs.mkdirSync(tempDir, { recursive: true });
-                      await unzipFile(localFilePath, tempDir);
-                      await ensureDirectoryExists(sftp, newDir);
-                      await uploadDirectory(sftp, tempDir, newDir);
-                      fs.rmSync(tempDir, { recursive: true, force: true });
-                      // Remove the ZIP file after extraction and upload
-                      await new Promise((resolve, reject) => {
-                          sftp.unlink(remoteFilePath, (err) => {
-                              if (err) reject(err);
-                              else resolve();
-                          });
-                      });
-                      console.log(`Deleted ZIP file: ${remoteFilePath}`);
-                  }
-
-                  // Clean up the temporary file after all operations are completed
-                  fs.unlink(localFilePath, (err) => {
-                      if (err) console.error('Error deleting temp file:', err);
-                      else console.log('Temp file deleted:', localFilePath);
-                  });
-
-                  // Log the upload activity
-                  const formattedIpAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-                  console.log('IP Address:', formattedIpAddress); // Debug logging
-                  logSFTPServerAction(req.user.username, 'upload', remoteFilePath, formattedIpAddress);
-              }
-
-              res.send('Files uploaded successfully');
-          } catch (error) {
-              console.error('Error uploading files:', error);
-              res.status(500).send('Error uploading files: ' + error.message);
-          } finally {
-              conn.end();
+            fs.mkdirSync(tempDir, { recursive: true });
+            await unzipFile(localFilePath, tempDir);
+            await ensureDirectoryExists(sftp, newDir);
+            await uploadDirectory(sftp, tempDir, newDir);
+            fs.rmSync(tempDir, { recursive: true, force: true });
+            // Remove the ZIP file after extraction and upload
+            await new Promise((resolve, reject) => {
+              sftp.unlink(remoteFilePath, (err) => {
+                if (err) reject(err);
+                else resolve();
+              });
+            });
+            console.log(`Deleted ZIP file: ${remoteFilePath}`);
           }
-      });
+
+          // Clean up the temporary file after all operations are completed
+          fs.unlink(localFilePath, (err) => {
+            if (err) console.error('Error deleting temp file:', err);
+            else console.log('Temp file deleted:', localFilePath);
+          });
+
+          // Log the upload activity
+          const formattedIpAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+          console.log('IP Address:', formattedIpAddress); // Debug logging
+          logSFTPServerAction(req.user.username, 'upload', remoteFilePath, formattedIpAddress);
+        }
+
+        res.send('Files uploaded successfully');
+      } catch (error) {
+        console.error('Error uploading files:', error);
+        res.status(500).send('Error uploading files: ' + error.message);
+      } finally {
+        conn.end();
+      }
+    });
   }).connect(sftpConnectionDetails);
 });
 
@@ -548,8 +687,8 @@ async function getUniqueDirectoryPath(sftp, remoteDirPath) {
 
   // Check if directory exists and modify the name if necessary
   while (await fileExists(sftp, uniqueDirPath)) {
-      uniqueDirPath = path.join(path.dirname(remoteDirPath), `${path.basename(remoteDirPath)}-${counter}`);
-      counter++;
+    uniqueDirPath = path.join(path.dirname(remoteDirPath), `${path.basename(remoteDirPath)}-${counter}`);
+    counter++;
   }
 
   return uniqueDirPath;
@@ -557,20 +696,20 @@ async function getUniqueDirectoryPath(sftp, remoteDirPath) {
 
 async function fileExists(sftp, remoteFilePath) {
   return new Promise((resolve, reject) => {
-      sftp.stat(remoteFilePath, (err, stats) => {
-          if (err) {
-              if (err.code === 2) {
-                  // File or directory does not exist
-                  resolve(false);
-              } else {
-                  // Some other error
-                  reject(err);
-              }
-          } else {
-              // File or directory exists
-              resolve(true);
-          }
-      });
+    sftp.stat(remoteFilePath, (err, stats) => {
+      if (err) {
+        if (err.code === 2) {
+          // File or directory does not exist
+          resolve(false);
+        } else {
+          // Some other error
+          reject(err);
+        }
+      } else {
+        // File or directory exists
+        resolve(true);
+      }
+    });
   });
 }
 
@@ -1185,18 +1324,18 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'sftp.html'));
 });
 
+
 const server = app.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);
   server.timeout = 0;
-  
+
   // Attach WebSocket server to the same HTTP server
   wss = new WebSocket.Server({ server });
+
   wss.on('connection', function connection(ws) {
     console.log('Client connected to WebSocket.');
+
+    // Add any message handlers or other WebSocket-related code here
   });
-
-  // Run the video thumbnail pre-caching process on server startup
-  precacheVideoThumbnails();
 });
-
 
