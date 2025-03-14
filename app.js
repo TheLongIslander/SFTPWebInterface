@@ -127,7 +127,7 @@ app.use(express.json({ limit: '50gb' })); // Parse JSON bodies
 app.use(fileUpload({
   useTempFiles: true,
   tempFileDir: process.env.TMP_UPLOAD_SERVER_PATH,  // Adjust this to your preferred temporary directory
-  limits: { fileSize: 50 * 1024 * 1024 * 1024 }  // Set the limit to 2GB
+  limits: { fileSize: 50 * 1024 * 1024 * 1024 } 
 }));
 app.use((err, req, res, next) => {
   if (err && err.code === 'LIMIT_FILE_SIZE') {
@@ -228,210 +228,113 @@ app.post('/lovely/open-directory', authenticateJWT, (req, res) => {
   res.json({ path: currentPath });
 });
 
+const downloads = {}; // Store pending downloads
 
 app.post('/lovely/download', (req, res) => {
-  const token = req.body.token;
-  const filePath = req.body.path;
+  const { token, path: filePath, requestId: frontendRequestId } = req.body;
   const filename = path.basename(filePath);
-  const localPath = path.join(os.tmpdir(), filename);
-  const zipFilePath = path.join(os.tmpdir(), `${filename}.zip`);
-  const requestId = req.body.requestId || generateUniqueId();
+  const formattedIpAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
 
-  const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress || req.socket.remoteAddress || req.connection.socket.remoteAddress;
-  const formattedIpAddress = ipAddress.startsWith('::ffff:') ? ipAddress.replace('::ffff:', '') : (ipAddress === '::1' ? '127.0.0.1' : ipAddress);
-
-  jwt.verify(token, process.env.JWT_SECRET, async (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
-      console.error(`Failed token verification for download attempt on ${filePath}`);
-      logSFTPServerAction('unknown', 'download', filePath, ipAddress, 0, 'Token verification failed');
+      logSFTPServerAction('unknown', 'download', filePath, formattedIpAddress, 0, 'Token verification failed');
       return res.sendStatus(403);
     }
 
-    console.log(`User ${user.username} is attempting to download ${filePath}`);
-    logSFTPServerAction(user.username, 'download_attempt', filePath, formattedIpAddress);
+    console.log(`User ${user.username} requested download for ${filePath}`);
 
-    const conn = new Client();
-    conn.on('ready', () => {
-      conn.sftp(async (err, sftp) => {
-        if (err) {
-          console.error('SFTP connection error:', err);
-          logSFTPServerAction(user.username, 'download', filePath, ipAddress, 0, 'SFTP connection error');
-          return res.status(500).send('SFTP connection error: ' + err.message);
-        }
+    // Use frontend's requestId if provided; otherwise, generate a new one
+    const requestId = frontendRequestId || generateUniqueId();
 
-        try {
-          const stats = await sftpStat(sftp, filePath);
+    console.log(`[DEBUG] Using Request ID: ${requestId} for ${filename}`);
 
-          if (stats.isDirectory()) {
-            console.log(`Downloading directory: ${filePath}`);
+    // Spawn a worker to handle the download
+    const worker = new Worker(path.join(__dirname, 'downloadWorker.js'), {
+      workerData: { filePath, user, requestId, formattedIpAddress }
+    });
 
-            // Ensure old extracted directory is deleted before re-downloading
-            if (fs.existsSync(localPath)) {
-              console.log(`Deleting old extracted directory: ${localPath}`);
-              fs.rmSync(localPath, { recursive: true, force: true });
-            }
+    downloads[requestId] = { worker, status: "in-progress", filePath: null };
 
-            await fsPromises.mkdir(localPath, { recursive: true });
+    worker.on('message', (message) => {
+      if (message.type === 'progress') {
+        broadcastProgress(requestId, message.progress);
+      }
+      if (message.type === 'done') {
+        downloads[requestId].status = "ready";
+        downloads[requestId].filePath = message.filePath;
+        broadcastProgress(requestId, 100);
 
-            const totalSize = await getTotalSize(sftp, filePath);
-            let downloadedSize = 0;
+        console.log(`[DEBUG] Download completed for ${filePath}. Notifying frontend.`);
 
-            async function downloadWithProgress(sftp, remotePath, localPath) {
-              await fsPromises.mkdir(localPath, { recursive: true });
-
-              const items = await new Promise((resolve, reject) => {
-                sftp.readdir(remotePath, (err, list) => {
-                  if (err) reject(err);
-                  else resolve(list);
-                });
-              });
-
-              for (const item of items) {
-                const remoteItemPath = path.join(remotePath, item.filename);
-                const localItemPath = path.join(localPath, item.filename);
-
-                if (item.longname.startsWith('d')) {
-                  await downloadWithProgress(sftp, remoteItemPath, localItemPath);
-                } else {
-                  await new Promise((resolve, reject) => {
-                    sftp.fastGet(remoteItemPath, localItemPath, (err) => {
-                      if (err) reject(err);
-                      else resolve();
-                    });
-                  });
-
-                  downloadedSize += item.attrs.size;
-                  const progress = Math.min((downloadedSize / totalSize) * 100, 100);
-                  console.log(`[DEBUG] Broadcasting progress ${progress}% for Request ID: ${requestId}`);
-                  broadcastProgress(requestId, progress);
-                  
-                }
-              }
-            }
-
-            await downloadWithProgress(sftp, filePath, localPath);
-            console.log(`Directory download complete: ${filePath}`);
-
-            let totalFiles = 1;
-            try {
-              const stdout = execSync(`find "${localPath}" -type f | wc -l`).toString().trim();
-              totalFiles = parseInt(stdout, 10) || 1;
-              console.log(`Total files to zip: ${totalFiles}`);
-            } catch (err) {
-              console.error("Error counting files:", err);
-              totalFiles = 1;
-            }
-
-            console.log(`Starting ZIP compression for: ${localPath}`);
-
-            // Ensure old ZIP file is deleted before creating a new one
-            if (fs.existsSync(zipFilePath)) {
-              console.log(`Deleting old ZIP file: ${zipFilePath}`);
-              fs.unlinkSync(zipFilePath);
-            }
-
-            await new Promise((resolve, reject) => {
-              const zipProcess = spawn('stdbuf', ['-oL', 'zip', '-r', zipFilePath, '.'], { cwd: localPath });
-
-              let zippedFiles = 0;
-              zipProcess.stdout.setEncoding('utf8');
-              zipProcess.stdout.on('data', (data) => {
-                process.stdout.write(data);
-
-                const matches = data.match(/adding: ([^ ]+)/g);
-                if (matches) {
-                  zippedFiles += matches.length;
-                }
-
-                const progress = totalFiles > 0 ? Math.min((zippedFiles / totalFiles) * 100, 100) : 100;
-                console.log(`[ZIP PROGRESS] ${progress.toFixed(2)}% (${zippedFiles}/${totalFiles} files)`);
-                
-                console.log(`[DEBUG] Broadcasting progress ${progress}% for Request ID: ${requestId}`);
-                broadcastProgress(requestId, progress);
-                
-              });
-
-              zipProcess.on('close', (code) => {
-                if (code !== 0) {
-                  reject(new Error(`ZIP process exited with code ${code}`));
-                } else {
-                  resolve();
-                }
-              });
-
-              zipProcess.on('error', (err) => {
-                reject(err);
-              });
-            });
-
-            console.log(`ZIP file created: ${zipFilePath}`);
-
-            if (!res.headersSent) {
-              res.setHeader('Content-Disposition', `attachment; filename="${filename}.zip"`);
-              res.setHeader('Content-Type', 'application/zip');
-            }
-
-            const fileStream = fs.createReadStream(zipFilePath);
-            fileStream.pipe(res);
-
-            fileStream.on('close', () => {
-              console.log(`ZIP file streamed successfully for ${filePath}`);
-              logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
-              exec(`rm -rf "${localPath}" && rm -f "${zipFilePath}"`);
-              broadcastProgress(requestId, 100);
-            });
-
-            fileStream.on('error', (error) => {
-              console.error('Error streaming ZIP file:', error);
-              if (!res.headersSent) {
-                res.status(500).send('Error streaming ZIP file');
-              }
-            });
-
-          } else {
-            console.log(`Downloading file: ${filePath}`);
-
-            await new Promise((resolve, reject) => {
-              sftp.fastGet(filePath, localPath, (err) => {
-                if (err) reject(err);
-                else resolve();
-              });
-            });
-
-            if (!res.headersSent) {
-              res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-              res.setHeader('Content-Type', 'application/octet-stream');
-            }
-
-            const fileStream = fs.createReadStream(localPath);
-            fileStream.pipe(res);
-
-            fileStream.on('close', () => {
-              console.log(`File ${filePath} successfully downloaded by ${user.username}`);
-              logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress);
-              exec(`rm -rf "${localPath}"`);
-            });
-
-            fileStream.on('error', (error) => {
-              console.error('Error reading file:', error);
-              if (!res.headersSent) {
-                res.status(500).send('Error reading file');
-              }
-            });
+        wss.clients.forEach(client => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: 'complete', requestId }));
           }
-        } catch (error) {
-          console.error('Failed to process download:', error);
-          logSFTPServerAction(user.username, 'download', filePath, formattedIpAddress, 0, error.message);
-          if (!res.headersSent) {
-            res.status(500).send('Failed to process download: ' + error.message);
-          }
-        } finally {
-          conn.end();
-        }
-      });
-    }).connect(sftpConnectionDetails);
+        });
+      }
+    });
+
+    worker.on('error', (error) => {
+      console.error('[Worker Error]', error);
+      downloads[requestId].status = "error";
+    });
+
+    worker.on('exit', (code) => {
+      if (code !== 0) {
+        console.error(`Worker exited with code ${code}`);
+      }
+    });
+
+    // Send the response **with the correct requestId** back to the frontend
+    res.json({ requestId, path: filePath, message: "Download is processing in the background." });
   });
 });
+
+
+app.get('/lovely/download-file', authenticateJWT, (req, res) => {
+  const requestId = req.query.requestId;
+  if (!requestId) {
+      console.error('[ERROR] Missing requestId');
+      return res.status(400).json({ error: 'Missing requestId' });
+  }
+
+  const zipFilePath = path.join(os.tmpdir(), `${requestId}.zip`);
+
+  // Check if file exists before proceeding
+  fs.access(zipFilePath, fs.constants.F_OK, (err) => {
+      if (err) {
+          console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
+          return res.status(404).json({ error: 'File not ready or does not exist' });
+      }
+
+      console.log(`[DEBUG] Serving ZIP file: ${zipFilePath}`);
+
+      // Set headers before streaming the file
+      res.setHeader('Content-Disposition', `attachment; filename="${requestId}.zip"`);
+      res.setHeader('Content-Type', 'application/zip');
+
+      // Stream file to avoid memory overhead
+      const fileStream = fs.createReadStream(zipFilePath);
+      fileStream.pipe(res);
+
+      fileStream.on('error', (streamErr) => {
+          console.error(`[ERROR] Error streaming file: ${streamErr.message}`);
+          return res.status(500).json({ error: 'Error streaming file' });
+      });
+
+      fileStream.on('end', () => {
+          console.log(`[DEBUG] Successfully sent ${zipFilePath}, cleaning up.`);
+          fs.unlink(zipFilePath, (unlinkErr) => {
+              if (unlinkErr) {
+                  console.error(`[ERROR] Failed to delete ${zipFilePath}: ${unlinkErr.message}`);
+              }
+          });
+      });
+  });
+});
+
+
+
 
 
 
@@ -476,10 +379,11 @@ function broadcastProgress(requestId, progress) {
   wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
           console.log(`[DEBUG] Sending progress update: ${progress}% to WebSocket client`);
-          client.send(JSON.stringify({ type: 'progress', requestId, value: progress }));
+          client.send(JSON.stringify({ type: 'progress', requestId, progress }));
       }
   });
 }
+
 
 
 
