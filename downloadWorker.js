@@ -17,7 +17,7 @@ const sftpConnectionDetails = {
 const { filePath, user, requestId, formattedIpAddress } = workerData;
 const filename = path.basename(filePath);
 const localPath = path.join(os.tmpdir(), filename);
-const zipFilePath = path.join(os.tmpdir(), `${filename}.zip`);
+const zipFilePath = path.join(os.tmpdir(), `${requestId}.zip`);
 let downloadedSize = 0;
 let totalSize = 0;
 
@@ -67,7 +67,14 @@ conn.on('ready', async () => {
       console.log(`ZIP file created: ${zipFilePath}`);
 
       console.log(`[DEBUG] Worker done. Sending completion message for Request ID: ${requestId}`);
-      parentPort.postMessage({ type: 'done', requestId, filePath: zipFilePath });
+      console.log(`[DEBUG] Worker created ZIP file at: ${zipFilePath}`);
+
+      parentPort.postMessage({ 
+        type: 'done', 
+        requestId, 
+        filePath: zipFilePath, 
+        filename: `${requestId}.zip`  // Explicitly include the filename
+      });
       
 
     } catch (error) {

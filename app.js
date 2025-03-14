@@ -291,8 +291,10 @@ app.post('/lovely/download', (req, res) => {
 });
 
 
-app.get('/lovely/download-file', authenticateJWT, (req, res) => {
-  const requestId = req.query.requestId;
+app.post('/lovely/download-file', authenticateJWT, (req, res) => {
+  console.log(`[DEBUG] /lovely/download-file hit! Request ID: ${req.body.requestId}`);
+  const { requestId } = req.body;
+
   if (!requestId) {
       console.error('[ERROR] Missing requestId');
       return res.status(400).json({ error: 'Missing requestId' });
@@ -300,38 +302,39 @@ app.get('/lovely/download-file', authenticateJWT, (req, res) => {
 
   const zipFilePath = path.join(os.tmpdir(), `${requestId}.zip`);
 
-  // Check if file exists before proceeding
-  fs.access(zipFilePath, fs.constants.F_OK, (err) => {
-      if (err) {
-          console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
-          return res.status(404).json({ error: 'File not ready or does not exist' });
-      }
+  // Check if the file exists before proceeding
+  if (!fs.existsSync(zipFilePath)) {
+      console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
+      return res.status(404).json({ error: 'File not ready or does not exist' });
+  }
 
-      console.log(`[DEBUG] Serving ZIP file: ${zipFilePath}`);
+  console.log(`[DEBUG] Serving ZIP file: ${zipFilePath}`);
 
-      // Set headers before streaming the file
-      res.setHeader('Content-Disposition', `attachment; filename="${requestId}.zip"`);
-      res.setHeader('Content-Type', 'application/zip');
+  // Set headers to force download
+  res.setHeader('Content-Disposition', `attachment; filename="${requestId}.zip"`);
+  res.setHeader('Content-Type', 'application/zip');
 
-      // Stream file to avoid memory overhead
-      const fileStream = fs.createReadStream(zipFilePath);
-      fileStream.pipe(res);
+  // Stream file for efficiency
+  const fileStream = fs.createReadStream(zipFilePath);
 
-      fileStream.on('error', (streamErr) => {
-          console.error(`[ERROR] Error streaming file: ${streamErr.message}`);
-          return res.status(500).json({ error: 'Error streaming file' });
-      });
+  fileStream.on('error', (streamErr) => {
+      console.error(`[ERROR] Error streaming file: ${streamErr.message}`);
+      res.status(500).json({ error: 'Error streaming file' });
+  });
 
-      fileStream.on('end', () => {
-          console.log(`[DEBUG] Successfully sent ${zipFilePath}, cleaning up.`);
-          fs.unlink(zipFilePath, (unlinkErr) => {
-              if (unlinkErr) {
-                  console.error(`[ERROR] Failed to delete ${zipFilePath}: ${unlinkErr.message}`);
-              }
-          });
+  fileStream.pipe(res).on('finish', () => {
+      console.log(`[DEBUG] Successfully sent ${zipFilePath}, cleaning up.`);
+
+      // Delete the file after it has been fully sent
+      fs.unlink(zipFilePath, (unlinkErr) => {
+          if (unlinkErr) {
+              console.error(`[ERROR] Failed to delete ${zipFilePath}: ${unlinkErr.message}`);
+          }
       });
   });
 });
+
+
 
 
 
