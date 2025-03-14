@@ -36,12 +36,12 @@ const users = {
   },
   bear: {
     username: "bear",
-    password: process.env.BEAR_PASSWORD_HASH, // Regular password (to be set later)
+    password: process.env.BEAR_PASSWORD_HASH,
     passKey: null // Optional PassKey
   },
   bee: {
     username: "bee",
-    password: process.env.BEE_PASSWORD_HASH, // Regular password (to be set later)
+    password: process.env.BEE_PASSWORD_HASH,
     passKey: null // Optional PassKey
   }
 };
@@ -491,13 +491,7 @@ function generateUniqueId() {
   });
 }
 
-
-
-
-
-
-
-
+/* 
 
 const zipDirectory = async (localPath, filename) => {
   const zipPath = `${localPath}/${filename}.zip`;
@@ -552,7 +546,7 @@ async function downloadDirectory(sftp, remotePath, localPath) {
       await fsPromises.utimes(localItemPath, atime, mtime);
     }
   }
-}
+} */
 
 
 app.post('/lovely/upload', authenticateJWT, (req, res) => {
@@ -976,7 +970,7 @@ function processQueue() {
 }
 
 // Function to process HEIC in a worker thread
-function processHEICWorker(heicBuffer, cacheFilePath, res) {
+/* function processHEICWorker(heicBuffer, cacheFilePath, res) {
   const placeholderImagePath = path.join(__dirname, 'assets', 'android-chrome-512x512.png');
   return new Promise((resolve, reject) => {
     // Spawn a new worker thread for HEIC conversion
@@ -1017,7 +1011,7 @@ function processHEICWorker(heicBuffer, cacheFilePath, res) {
       }
     });
   });
-}
+} */
 
 
 
@@ -1334,8 +1328,11 @@ const server = app.listen(port, () => {
 
   wss.on('connection', function connection(ws) {
     console.log('Client connected to WebSocket.');
-
     // Add any message handlers or other WebSocket-related code here
   });
+
+  // Start pre-caching video thumbnails
+  console.log('Starting video thumbnail pre-caching...');
+  precacheVideoThumbnails();
 });
 

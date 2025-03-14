@@ -841,6 +841,12 @@ function updateZipProgress(requestId, progress) {
             progressBar.value = progress; // Update progress value
             progressBar.style.display = 'block'; // Show again
 
+            requestAnimationFrame(() => {
+                progressBar.style.display = 'block'; // Show again
+                progressBar.offsetHeight; // Force reflow
+            });
+            
+
             console.log(`[DEBUG] Updated progress bar to ${progress}% for Request ID: ${requestId}`);
 
             if (progress >= 100) {
