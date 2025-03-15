@@ -1,115 +1,109 @@
-let ws;
-let reconnectAttempts = 0;
-const MAX_RETRIES = 10;
-
 function setupWebSocket() {
-    if (reconnectAttempts >= MAX_RETRIES) {
-        console.error('[DEBUG] Max WebSocket reconnect attempts reached.');
+    if (window.ws && window.ws.readyState !== WebSocket.CLOSED) {
+        console.log("[DEBUG] WebSocket is already open. Skipping new connection.");
         return;
     }
 
-    ws = new WebSocket(`wss://${window.location.host}/lovely`);
+    console.log("[DEBUG] Initializing new WebSocket connection...");
+    window.ws = new WebSocket(`wss://${window.location.host}/lovely`);
 
-
-    ws.onopen = function () {
-        console.log('[DEBUG] WebSocket connected.');
-        reconnectAttempts = 0;
+    window.ws.onopen = function () {
+        console.log("[DEBUG] WebSocket connected successfully.");
     };
-    ws.onmessage = function (event) {
-        // console.log(`[DEBUG] WebSocket raw message: ${event.data}`);
 
+    window.ws.onmessage = function (event) {
         try {
             const message = JSON.parse(event.data);
-            console.log(`[DEBUG] Parsed WebSocket message:`, message);
+            console.log("[DEBUG] Received WebSocket message:", message);
 
             if (!message.requestId) {
                 console.error("[ERROR] WebSocket message missing requestId:", message);
                 return;
             }
 
-            const requestId = message.requestId; // Ensure requestId is set
+            const requestId = message.requestId;
 
-            // console.log(`[DEBUG] Assigned requestId: ${requestId}`);
-
-            if (message.type === 'progress') {
-                // console.log(`[DEBUG] Progress update: ${message.progress}% for Request ID: ${requestId}`);
+            if (message.type === "progress") {
                 updateZipProgress(requestId, message.progress);
-            } else if (message.type === 'complete') {
+            } else if (message.type === "complete") {
                 console.log(`[DEBUG] Download ready for Request ID: ${requestId}`);
                 updateZipProgress(requestId, 100);
                 console.log(`[DEBUG] Initiating final file download for Request ID: ${requestId}`);
 
-                const token = localStorage.getItem('token');
+                const token = localStorage.getItem("token");
                 if (!token) {
-                    console.error('[ERROR] Missing authentication token');
-                    alert('Authentication required. Please log in again.');
+                    console.error("[ERROR] Missing authentication token");
+                    alert("Authentication required. Please log in again.");
                     return;
                 }
 
                 console.log("[DEBUG] Attempting to fetch ZIP from /lovely/download-file with Request ID:", requestId);
 
-                fetch('/lovely/download-file', {
-                    method: 'POST',
+                fetch("/lovely/download-file", {
+                    method: "POST",
                     headers: {
-                        'Authorization': 'Bearer ' + token,
-                        'Content-Type': 'application/json'
+                        "Authorization": "Bearer " + token,
+                        "Content-Type": "application/json",
                     },
-                    body: JSON.stringify({ requestId })
+                    body: JSON.stringify({ requestId }),
                 })
-                    .then(response => {
-                        console.log("[DEBUG] Response received from /lovely/download-file", response);
+                    .then((response) => {
+                        console.log("[DEBUG] Response received from /lovely/download-file:", response);
                         if (!response.ok) {
                             throw new Error(`Failed to download file: ${response.statusText}`);
                         }
                         return response.blob();
                     })
-                    .then(blob => {
+                    .then((blob) => {
                         console.log("[DEBUG] Received blob, initiating download...");
                         const downloadUrl = URL.createObjectURL(blob);
-                        const downloadLink = document.createElement('a');
+                        const downloadLink = document.createElement("a");
                         downloadLink.href = downloadUrl;
-                        downloadLink.setAttribute('download', `${requestId}.zip`);
+                        downloadLink.setAttribute("download", `${requestId}.zip`);
                         document.body.appendChild(downloadLink);
                         downloadLink.click();
                         document.body.removeChild(downloadLink);
                         URL.revokeObjectURL(downloadUrl);
                     })
-                    .catch(error => {
+                    .catch((error) => {
                         console.error("[ERROR] Fetch failed:", error);
                         alert("Error downloading the file. Please try again.");
                     });
             }
         } catch (error) {
-            console.error(`[ERROR] Failed to parse WebSocket message: ${error.message}`, event.data);
+            console.error("[ERROR] Failed to parse WebSocket message:", error.message, event.data);
         }
     };
 
-
-    ws.onclose = function (e) {
-        console.error(`[DEBUG] WebSocket closed (code: ${e.code}, reason: ${e.reason}). Attempting to reconnect.`);
-        reconnectAttempts++;
-
-        if (reconnectAttempts < MAX_RETRIES) {
-            console.log(`[DEBUG] WebSocket reconnect attempt #${reconnectAttempts}`);
-            setTimeout(setupWebSocket, 1000);
-        } else {
-            console.error('[DEBUG] Max WebSocket reconnect attempts reached.');
-        }
+    window.ws.onerror = function (err) {
+        console.error("[DEBUG] WebSocket error:", err.message);
+        window.ws.close();
     };
 
+    window.ws.onclose = function (event) {
+        console.warn("[DEBUG] WebSocket closed:", event.reason || "No reason provided.");
 
-    ws.onerror = function (err) {
-        console.error(`[DEBUG] WebSocket error: ${err.message}`);
-        ws.close();
+        // Attempt to reconnect after a short delay if the connection wasn't closed manually
+        setTimeout(() => {
+            if (!window.ws || window.ws.readyState === WebSocket.CLOSED) {
+                console.log("[DEBUG] Attempting to reconnect WebSocket...");
+                setupWebSocket();
+            }
+        }, 3000);
     };
 }
 
-// Ensure WebSocket starts on page load
-setupWebSocket();
+// Ensure the WebSocket is only initialized once on DOMContentLoaded
+document.addEventListener("DOMContentLoaded", function () {
+    if (!window.ws || window.ws.readyState === WebSocket.CLOSED) {
+        console.log("[DEBUG] DOMContentLoaded: Setting up WebSocket.");
+        setupWebSocket();
+    } else {
+        console.log("[DEBUG] WebSocket already exists. Skipping reinitialization.");
+    }
+});
 
 
-
-// Listen for popstate event to handle back/forward browser navigation
 // Listen for popstate event to handle back/forward browser navigation
 window.addEventListener('popstate', throttle(function (event) {
     console.log('popstate triggered, event state:', event.state);
@@ -126,7 +120,6 @@ let typingInProgress = false;  // Declare at global scope
 
 document.addEventListener('DOMContentLoaded', function () {
     fetchFiles('/');
-
     // Initialize WebSocket inside DOMContentLoaded
     setupWebSocket();
 
@@ -367,7 +360,7 @@ function fetchFiles(path, shouldPushState = true, forceUpdate = false) {
                                 const requestId = data.requestId;  // Define requestId properly here
                                 downloadForm.dataset.requestId = requestId; // Assign backend's request ID
 
-                                
+
                                 showLoadingSpinner(downloadForm, requestId);
 
                                 return fetch('/lovely/download', {

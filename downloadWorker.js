@@ -86,7 +86,6 @@ conn.on('ready', async () => {
   });
 }).connect(sftpConnectionDetails);
 
-// 🔹 Helper Functions 🔹
 
 async function sftpStat(sftp, filePath) {
   return new Promise((resolve, reject) => {
