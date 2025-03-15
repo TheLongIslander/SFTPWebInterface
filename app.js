@@ -302,7 +302,7 @@ app.post('/lovely/download-file', authenticateJWT, (req, res) => {
 
   const zipFilePath = path.join(os.tmpdir(), `${requestId}.zip`);
 
-  // Check if the file exists before proceeding
+  // Check if file exists before proceeding
   if (!fs.existsSync(zipFilePath)) {
       console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
       return res.status(404).json({ error: 'File not ready or does not exist' });
@@ -314,18 +314,19 @@ app.post('/lovely/download-file', authenticateJWT, (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${requestId}.zip"`);
   res.setHeader('Content-Type', 'application/zip');
 
-  // Stream file for efficiency
+  // Create file read stream
   const fileStream = fs.createReadStream(zipFilePath);
 
-  fileStream.on('error', (streamErr) => {
-      console.error(`[ERROR] Error streaming file: ${streamErr.message}`);
-      res.status(500).json({ error: 'Error streaming file' });
+  fileStream.on('error', (err) => {
+      console.error(`[ERROR] Error streaming file: ${err.message}`);
+      res.end(); // End response gracefully
   });
 
-  fileStream.pipe(res).on('finish', () => {
-      console.log(`[DEBUG] Successfully sent ${zipFilePath}, cleaning up.`);
+  fileStream.pipe(res);
 
-      // Delete the file after it has been fully sent
+  // Ensure cleanup after response is finished
+  res.on('close', () => {
+      console.log(`[DEBUG] Finished sending ${zipFilePath}, cleaning up.`);
       fs.unlink(zipFilePath, (unlinkErr) => {
           if (unlinkErr) {
               console.error(`[ERROR] Failed to delete ${zipFilePath}: ${unlinkErr.message}`);
@@ -333,6 +334,7 @@ app.post('/lovely/download-file', authenticateJWT, (req, res) => {
       });
   });
 });
+
 
 
 

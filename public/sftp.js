@@ -15,67 +15,76 @@ function setupWebSocket() {
         console.log('[DEBUG] WebSocket connected.');
         reconnectAttempts = 0;
     };
-
     ws.onmessage = function (event) {
-        console.log(`[DEBUG] WebSocket raw message: ${event.data}`);
+        // console.log(`[DEBUG] WebSocket raw message: ${event.data}`);
 
         try {
             const message = JSON.parse(event.data);
             console.log(`[DEBUG] Parsed WebSocket message:`, message);
 
+            if (!message.requestId) {
+                console.error("[ERROR] WebSocket message missing requestId:", message);
+                return;
+            }
+
+            const requestId = message.requestId; // Ensure requestId is set
+
+            // console.log(`[DEBUG] Assigned requestId: ${requestId}`);
+
             if (message.type === 'progress') {
-                console.log(`[DEBUG] Progress update: ${message.progress}% for Request ID: ${message.requestId}`);
-                updateZipProgress(message.requestId, message.progress);
-            } else if (message.type === 'done') {
-                console.log(`[DEBUG] Download ready for Request ID: ${message.requestId}`);
-                updateZipProgress(message.requestId, 100);
+                // console.log(`[DEBUG] Progress update: ${message.progress}% for Request ID: ${requestId}`);
+                updateZipProgress(requestId, message.progress);
+            } else if (message.type === 'complete') {
+                console.log(`[DEBUG] Download ready for Request ID: ${requestId}`);
+                updateZipProgress(requestId, 100);
+                console.log(`[DEBUG] Initiating final file download for Request ID: ${requestId}`);
 
-                // Initiate the file download
-                setTimeout(() => {
-                    console.log(`[DEBUG] Initiating final file download for Request ID: ${message.requestId}`);
+                const token = localStorage.getItem('token');
+                if (!token) {
+                    console.error('[ERROR] Missing authentication token');
+                    alert('Authentication required. Please log in again.');
+                    return;
+                }
 
-                    const token = localStorage.getItem('token');
-                    if (!token) {
-                        console.error('[ERROR] Missing authentication token');
-                        alert('Authentication required. Please log in again.');
-                        return;
-                    }
+                console.log("[DEBUG] Attempting to fetch ZIP from /lovely/download-file with Request ID:", requestId);
 
-                    fetch('/lovely/download-file', {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': 'Bearer ' + token,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({ requestId: message.requestId })
-                    })
+                fetch('/lovely/download-file', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + token,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ requestId })
+                })
                     .then(response => {
+                        console.log("[DEBUG] Response received from /lovely/download-file", response);
                         if (!response.ok) {
                             throw new Error(`Failed to download file: ${response.statusText}`);
                         }
-                        return response.blob();  // Process binary data instead of JSON
+                        return response.blob();
                     })
                     .then(blob => {
+                        console.log("[DEBUG] Received blob, initiating download...");
                         const downloadUrl = URL.createObjectURL(blob);
                         const downloadLink = document.createElement('a');
                         downloadLink.href = downloadUrl;
-                        downloadLink.setAttribute('download', message.filename || `${message.requestId}.zip`);
+                        downloadLink.setAttribute('download', `${requestId}.zip`);
                         document.body.appendChild(downloadLink);
                         downloadLink.click();
                         document.body.removeChild(downloadLink);
                         URL.revokeObjectURL(downloadUrl);
                     })
                     .catch(error => {
-                        console.error('[ERROR] Download failed:', error);
-                        alert('Error downloading the file. Please try again.');
-                        });
-                }, 500);
-
-            } 
+                        console.error("[ERROR] Fetch failed:", error);
+                        alert("Error downloading the file. Please try again.");
+                    });
+            }
         } catch (error) {
             console.error(`[ERROR] Failed to parse WebSocket message: ${error.message}`, event.data);
         }
     };
+
+
     ws.onclose = function (e) {
         console.error(`[DEBUG] WebSocket closed (code: ${e.code}, reason: ${e.reason}). Attempting to reconnect.`);
         reconnectAttempts++;
@@ -350,30 +359,29 @@ function fetchFiles(path, shouldPushState = true, forceUpdate = false) {
                         })
                             .then(response => response.json())
                             .then(data => {
+                                if (!data.requestId) {
+                                    throw new Error('Backend did not return a requestId!');
+                                }
+
                                 console.log(`[DEBUG] Received Request ID from Backend: ${data.requestId}`);
-                                downloadForm.dataset.requestId = data.requestId; // Assign backend's request ID
+                                const requestId = data.requestId;  // Define requestId properly here
+                                downloadForm.dataset.requestId = requestId; // Assign backend's request ID
+
+                                
+                                showLoadingSpinner(downloadForm, requestId);
+
+                                return fetch('/lovely/download', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({
+                                        token: localStorage.getItem('token'),
+                                        path: pathInput.value,
+                                        requestId: requestId  // Use requestId properly
+                                    })
+                                });
                             })
-                            .catch(error => {
-                                console.error('Download initiation failed:', error);
-                                alert('Error initiating download.');
-                            });
-
-
-                        console.log(`[DEBUG] Download started. Setting Request ID: ${requestId}`);
-
-                        showLoadingSpinner(downloadForm, requestId);
-
-                        fetch('/lovely/download', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                token: localStorage.getItem('token'),
-                                path: pathInput.value,
-                                requestId: requestId
-                            })
-                        })
                             .then(response => response.json())
                             .then(data => {
                                 console.log(`[DEBUG] Download initiated with Request ID: ${data.requestId}`);
@@ -385,6 +393,7 @@ function fetchFiles(path, shouldPushState = true, forceUpdate = false) {
 
                         return false;  // Prevent the form from actually submitting
                     };
+
 
 
 
@@ -869,7 +878,7 @@ function createPDFPreview(file, path) {
     return pdfThumbnail;
 }
 function updateZipProgress(requestId, progress) {
-    console.log(`[DEBUG] Received progress update: ${progress}% for Request ID: ${requestId}`);
+    // console.log(`[DEBUG] Received progress update: ${progress}% for Request ID: ${requestId}`);
 
     const forms = document.querySelectorAll('form');
     let formFound = false;
@@ -882,7 +891,7 @@ function updateZipProgress(requestId, progress) {
             return;
         }
 
-        console.log(`[DEBUG] Checking form. Form Request ID: ${formRequestId}, Expected: ${requestId}`);
+        // console.log(`[DEBUG] Checking form. Form Request ID: ${formRequestId}, Expected: ${requestId}`);
 
         if (formRequestId === requestId) {
             formFound = true;
@@ -910,7 +919,7 @@ function updateZipProgress(requestId, progress) {
             });
 
 
-            console.log(`[DEBUG] Updated progress bar to ${progress}% for Request ID: ${requestId}`);
+            // console.log(`[DEBUG] Updated progress bar to ${progress}% for Request ID: ${requestId}`);
 
             if (progress >= 100) {
                 console.log(`[DEBUG] Hiding spinner for Request ID: ${requestId}`);
