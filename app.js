@@ -299,31 +299,6 @@ app.post('/lovely/download', (req, res) => {
 });
 
 
-
-/* app.post('/lovely/download-file', authenticateJWT, (req, res) => {
-  console.log(`[DEBUG] /lovely/download-file hit! Request ID: ${req.body.requestId}`);
-  const { requestId } = req.body;
-
-  if (!requestId) {
-    console.error('[ERROR] Missing requestId');
-    return res.status(400).json({ error: 'Missing requestId' });
-  }
-
-  const zipFilePath = path.join(os.tmpdir(), `${requestId}.zip`);
-
-  if (!fs.existsSync(zipFilePath)) {
-    console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
-    return res.status(404).json({ error: 'File not ready or does not exist' });
-  }
-
-  console.log(`[DEBUG] File ready. Returning download URL for ${zipFilePath}`);
-
-  // Store the file path in memory and respond with a URL
-  tempDownloadLinks.set(requestId, zipFilePath);
-  res.json({ downloadUrl: `/lovely/downloads/${requestId}` });
-}); */
-
-
 const tempDownloadLinks = new Map(); // requestId -> file path
 
 app.get('/lovely/downloads/:requestId', (req, res) => {

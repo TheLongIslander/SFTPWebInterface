@@ -170,6 +170,15 @@ async function zipFile(filePath, zipFilePath) {
   parentPort.postMessage({ type: 'progress', requestId, progress: 100 });
 }
 
+async function downloadFile(sftp, remotePath, localPath) {
+  return new Promise((resolve, reject) => {
+    sftp.fastGet(remotePath, localPath, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
 async function downloadWithProgress(sftp, remotePath, localPath) {
   await fs.promises.mkdir(localPath, { recursive: true });
 
