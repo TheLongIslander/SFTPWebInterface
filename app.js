@@ -228,7 +228,8 @@ app.post('/lovely/open-directory', authenticateJWT, (req, res) => {
   res.json({ path: currentPath });
 });
 
-const downloads = {}; // Store pending downloads
+// At the top of app.js (if not already present)
+const downloads = {}; // Tracks active/downloaded ZIPs
 
 app.post('/lovely/download', (req, res) => {
   const { token, path: filePath, requestId: frontendRequestId } = req.body;
@@ -241,99 +242,117 @@ app.post('/lovely/download', (req, res) => {
       return res.sendStatus(403);
     }
 
-    console.log(`User ${user.username} requested download for ${filePath}`);
-
     // Use frontend's requestId if provided; otherwise, generate a new one
     const requestId = frontendRequestId || generateUniqueId();
+    console.log(`→ Download requested by ${user.username}: ${filePath} [ID: ${requestId}]`);
 
-    console.log(`[DEBUG] Using Request ID: ${requestId} for ${filename}`);
+    // Only spawn worker if we haven't already for this requestId
+    if (!downloads[requestId]) {
+      console.log(`   • spawning new Worker for ID ${requestId}`);
 
-    // Spawn a worker to handle the download
-    const worker = new Worker(path.join(__dirname, 'downloadWorker.js'), {
-      workerData: { filePath, user, requestId, formattedIpAddress }
-    });
+      const worker = new Worker(path.join(__dirname, 'downloadWorker.js'), {
+        workerData: {
+          filePath,
+          user,
+          requestId,
+          formattedIpAddress
+        }
+      });
 
-    downloads[requestId] = { worker, status: "in-progress", filePath: null };
+      downloads[requestId] = { worker, status: 'in-progress', filePath: null };
 
-    worker.on('message', (message) => {
-      if (message.type === 'progress') {
-        broadcastProgress(requestId, message.progress);
-      }
-      if (message.type === 'done') {
-        downloads[requestId].status = "ready";
-        downloads[requestId].filePath = message.filePath;
-        broadcastProgress(requestId, 100);
+      worker.on('message', message => {
+        if (message.type === 'progress') {
+          broadcastProgress(requestId, message.progress);
+        } else if (message.type === 'done') {
+          downloads[requestId].status   = 'ready';
+          downloads[requestId].filePath = message.filePath;
+          tempDownloadLinks.set(requestId, message.filePath);  // <-- Add this
+          broadcastProgress(requestId, 100);
 
-        console.log(`[DEBUG] Download completed for ${filePath}. Notifying frontend.`);
+          console.log(`[DEBUG] Download completed for ${filePath}. Notifying frontend.`);
 
-        wss.clients.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'complete', requestId }));
-          }
-        });
-      }
-    });
+          wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+              client.send(JSON.stringify({ type: 'complete', requestId }));
+            }
+          });
+        }
+      });
 
-    worker.on('error', (error) => {
-      console.error('[Worker Error]', error);
-      downloads[requestId].status = "error";
-    });
+      worker.on('error', err => {
+        console.error(`[Worker ${requestId}] error:`, err);
+        downloads[requestId].status = 'error';
+      });
 
-    worker.on('exit', (code) => {
-      if (code !== 0) {
-        console.error(`Worker exited with code ${code}`);
-      }
-    });
+      worker.on('exit', code => {
+        if (code !== 0)
+          console.error(`[Worker ${requestId}] exited with code ${code}`);
+      });
+    } else {
+      console.log(`   • Worker already running or done for ID ${requestId}`);
+    }
 
-    // Send the response **with the correct requestId** back to the frontend
-    res.json({ requestId, path: filePath, message: "Download is processing in the background." });
+    // Always ACK to frontend immediately
+    res.json({ requestId, message: 'Download queued' });
   });
 });
 
 
-app.post('/lovely/download-file', authenticateJWT, (req, res) => {
+
+/* app.post('/lovely/download-file', authenticateJWT, (req, res) => {
   console.log(`[DEBUG] /lovely/download-file hit! Request ID: ${req.body.requestId}`);
   const { requestId } = req.body;
 
   if (!requestId) {
-      console.error('[ERROR] Missing requestId');
-      return res.status(400).json({ error: 'Missing requestId' });
+    console.error('[ERROR] Missing requestId');
+    return res.status(400).json({ error: 'Missing requestId' });
   }
 
   const zipFilePath = path.join(os.tmpdir(), `${requestId}.zip`);
 
-  // Check if file exists before proceeding
   if (!fs.existsSync(zipFilePath)) {
-      console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
-      return res.status(404).json({ error: 'File not ready or does not exist' });
+    console.error(`[ERROR] Requested file not found: ${zipFilePath}`);
+    return res.status(404).json({ error: 'File not ready or does not exist' });
   }
 
-  console.log(`[DEBUG] Serving ZIP file: ${zipFilePath}`);
+  console.log(`[DEBUG] File ready. Returning download URL for ${zipFilePath}`);
 
-  // Set headers to force download
-  res.setHeader('Content-Disposition', `attachment; filename="${requestId}.zip"`);
+  // Store the file path in memory and respond with a URL
+  tempDownloadLinks.set(requestId, zipFilePath);
+  res.json({ downloadUrl: `/lovely/downloads/${requestId}` });
+}); */
+
+
+const tempDownloadLinks = new Map(); // requestId -> file path
+
+app.get('/lovely/downloads/:requestId', (req, res) => {
+
+  const requestId = req.params.requestId;
+  const filePath = tempDownloadLinks.get(requestId);
+
+  if (!filePath || !fs.existsSync(filePath)) {
+    return res.status(404).send('File not found');
+  }
+
+  const filename = path.basename(filePath);  // use real filename if available
+
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Length', fs.statSync(filePath).size);
 
-  // Create file read stream
-  const fileStream = fs.createReadStream(zipFilePath);
+  const stream = fs.createReadStream(filePath);
+  stream.pipe(res);
 
-  fileStream.on('error', (err) => {
-      console.error(`[ERROR] Error streaming file: ${err.message}`);
-      res.end(); // End response gracefully
-  });
-
-  fileStream.pipe(res);
-
-  // Ensure cleanup after response is finished
-  res.on('close', () => {
-      console.log(`[DEBUG] Finished sending ${zipFilePath}, cleaning up.`);
-      fs.unlink(zipFilePath, (unlinkErr) => {
-          if (unlinkErr) {
-              console.error(`[ERROR] Failed to delete ${zipFilePath}: ${unlinkErr.message}`);
-          }
-      });
+  res.on('finish', () => {
+    console.log(`[INFO] Download completed and sent to client: ${filePath} [Request ID: ${requestId}]`);
+    fs.unlink(filePath, () => {});
+    tempDownloadLinks.delete(requestId);
   });
 });
+
+
+
 
 
 

@@ -28,47 +28,10 @@ function setupWebSocket() {
             } else if (message.type === "complete") {
                 console.log(`[DEBUG] Download ready for Request ID: ${requestId}`);
                 updateZipProgress(requestId, 100);
-                console.log(`[DEBUG] Initiating final file download for Request ID: ${requestId}`);
 
-                const token = localStorage.getItem("token");
-                if (!token) {
-                    console.error("[ERROR] Missing authentication token");
-                    alert("Authentication required. Please log in again.");
-                    return;
-                }
-
-                console.log("[DEBUG] Attempting to fetch ZIP from /lovely/download-file with Request ID:", requestId);
-
-                fetch("/lovely/download-file", {
-                    method: "POST",
-                    headers: {
-                        "Authorization": "Bearer " + token,
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify({ requestId }),
-                })
-                    .then((response) => {
-                        console.log("[DEBUG] Response received from /lovely/download-file:", response);
-                        if (!response.ok) {
-                            throw new Error(`Failed to download file: ${response.statusText}`);
-                        }
-                        return response.blob();
-                    })
-                    .then((blob) => {
-                        console.log("[DEBUG] Received blob, initiating download...");
-                        const downloadUrl = URL.createObjectURL(blob);
-                        const downloadLink = document.createElement("a");
-                        downloadLink.href = downloadUrl;
-                        downloadLink.setAttribute("download", `${requestId}.zip`);
-                        document.body.appendChild(downloadLink);
-                        downloadLink.click();
-                        document.body.removeChild(downloadLink);
-                        URL.revokeObjectURL(downloadUrl);
-                    })
-                    .catch((error) => {
-                        console.error("[ERROR] Fetch failed:", error);
-                        alert("Error downloading the file. Please try again.");
-                    });
+                const fullUrl = `${window.location.origin}/lovely/downloads/${requestId}`;
+                console.log("[DEBUG] Opening direct download URL:", fullUrl);
+                window.open(fullUrl, "_blank");  // Avoids Safari fetch/blob issues
             }
         } catch (error) {
             console.error("[ERROR] Failed to parse WebSocket message:", error.message, event.data);
@@ -82,8 +45,6 @@ function setupWebSocket() {
 
     window.ws.onclose = function (event) {
         console.warn("[DEBUG] WebSocket closed:", event.reason || "No reason provided.");
-
-        // Attempt to reconnect after a short delay if the connection wasn't closed manually
         setTimeout(() => {
             if (!window.ws || window.ws.readyState === WebSocket.CLOSED) {
                 console.log("[DEBUG] Attempting to reconnect WebSocket...");
@@ -92,6 +53,9 @@ function setupWebSocket() {
         }, 3000);
     };
 }
+
+
+
 
 // Ensure the WebSocket is only initialized once on DOMContentLoaded
 document.addEventListener("DOMContentLoaded", function () {
@@ -120,7 +84,6 @@ let typingInProgress = false;  // Declare at global scope
 
 document.addEventListener('DOMContentLoaded', function () {
     fetchFiles('/');
-    // Initialize WebSocket inside DOMContentLoaded
     setupWebSocket();
 
     const logoutButton = document.getElementById('logout-button');
@@ -136,11 +99,11 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     pathInput.addEventListener('input', function () {
-        typingInProgress = true;  // User is typing
+        typingInProgress = true;
     });
 
     pathInput.addEventListener('blur', function () {
-        typingInProgress = false; // User stopped typing (input lost focus)
+        typingInProgress = false;
     });
 
     const createDirectoryButton = document.getElementById('create-directory-button');
@@ -151,14 +114,12 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
-    // Add event listener for file upload
     const uploadForm = document.getElementById('upload-form');
     uploadForm.addEventListener('submit', function (event) {
         event.preventDefault();
         uploadFiles();
     });
 
-    // Trigger upload when files are selected
     const fileInput = document.getElementById('file-input');
     fileInput.addEventListener('change', function () {
         if (this.files.length > 0) {
@@ -171,9 +132,56 @@ document.addEventListener('DOMContentLoaded', function () {
         triggerFileUpload();
     });
 
-    // Detect user activity
     detectUserActivity();
+
+    // 🔽 Hook up download forms
+    document.querySelectorAll('.download-form').forEach(downloadForm => {
+        downloadForm.onsubmit = async function (event) {
+            event.preventDefault();
+
+            const token = localStorage.getItem('token');
+            if (!token) {
+                alert('Authentication required. Please log in again.');
+                return false;
+            }
+
+            const filePath = this.querySelector('input[name="path"]').value;
+            const requestId = generateUniqueId();
+            this.dataset.requestId = requestId;
+
+            showLoadingSpinner(this, requestId);
+
+            try {
+                const res = await fetch('/lovely/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify({
+                        token,
+                        path: filePath,
+                        requestId
+                    })
+                });
+
+                if (!res.ok) throw new Error(res.statusText);
+
+                const { requestId: confirmed } = await res.json();
+                console.log('Download started (ID):', confirmed);
+
+                // Progress/complete will be handled in WebSocket
+            } catch (err) {
+                console.error('Failed to initiate download:', err);
+                hideLoadingSpinner(this);
+                alert('Download initiation failed: ' + err.message);
+            }
+
+            return false;
+        };
+    });
 });
+
 
 
 let activityTimeout;
