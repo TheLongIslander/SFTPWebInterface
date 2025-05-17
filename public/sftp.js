@@ -1,3 +1,7 @@
+const downloadWindows = {};  // Map to track opened popup windows by requestId
+const progressStateMap = {}; // Tracks previous progress and inferred phase per requestId
+
+
 function setupWebSocket() {
     if (window.ws && window.ws.readyState !== WebSocket.CLOSED) {
         console.log("[DEBUG] WebSocket is already open. Skipping new connection.");
@@ -25,14 +29,33 @@ function setupWebSocket() {
 
             if (message.type === "progress") {
                 updateZipProgress(requestId, message.progress);
-            } else if (message.type === "complete") {
+            } // inside setupWebSocket().onmessage:
+            else if (message.type === "complete") {
                 console.log(`[DEBUG] Download ready for Request ID: ${requestId}`);
-                updateZipProgress(requestId, 100);
-
+            
+                // Just in case compressing didn't clean it up
+                const form = document.querySelector(`form[data-request-id="${requestId}"]`);
+                if (form) {
+                    console.log(`[DEBUG] Final cleanup: hiding spinner for Request ID ${requestId}`);
+                    hideLoadingSpinner(form);
+                }
+            
                 const fullUrl = `${window.location.origin}/lovely/downloads/${requestId}`;
-                console.log("[DEBUG] Opening direct download URL:", fullUrl);
-                window.open(fullUrl, "_blank");  // Avoids Safari fetch/blob issues
+                console.log("[DEBUG] Full download URL:", fullUrl);
+            
+                const popup = downloadWindows[requestId];
+                if (popup && !popup.closed) {
+                    console.log("[DEBUG] Navigating pre-opened window to:", fullUrl);
+                    popup.location = fullUrl;
+                } else {
+                    console.warn("[DEBUG] No pre-opened window found; opening new tab.");
+                    window.open(fullUrl, "_blank");
+                }
+            
+                delete downloadWindows[requestId];
             }
+            
+
         } catch (error) {
             console.error("[ERROR] Failed to parse WebSocket message:", error.message, event.data);
         }
@@ -134,7 +157,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
     detectUserActivity();
 
-    // 🔽 Hook up download forms
     document.querySelectorAll('.download-form').forEach(downloadForm => {
         downloadForm.onsubmit = async function (event) {
             event.preventDefault();
@@ -149,6 +171,10 @@ document.addEventListener('DOMContentLoaded', function () {
             const requestId = generateUniqueId();
             this.dataset.requestId = requestId;
 
+            // Open a blank popup immediately (user gesture)
+            const popup = window.open('', '', 'width=600,height=400');
+            downloadWindows[requestId] = popup;
+
             showLoadingSpinner(this, requestId);
 
             try {
@@ -158,28 +184,25 @@ document.addEventListener('DOMContentLoaded', function () {
                         'Content-Type': 'application/json',
                         'Authorization': 'Bearer ' + token
                     },
-                    body: JSON.stringify({
-                        token,
-                        path: filePath,
-                        requestId
-                    })
+                    body: JSON.stringify({ token, path: filePath, requestId })
                 });
-
                 if (!res.ok) throw new Error(res.statusText);
 
                 const { requestId: confirmed } = await res.json();
                 console.log('Download started (ID):', confirmed);
-
-                // Progress/complete will be handled in WebSocket
             } catch (err) {
                 console.error('Failed to initiate download:', err);
                 hideLoadingSpinner(this);
                 alert('Download initiation failed: ' + err.message);
+                // If popup exists, close it
+                if (popup && !popup.closed) popup.close();
+                delete downloadWindows[requestId];
             }
 
             return false;
         };
     });
+
 });
 
 
@@ -513,6 +536,16 @@ function hideLoadingSpinner(form) {
         progressBar.remove();
     }
 
+    const progressLabel = form.querySelector('.zip-progress-label');
+    if (progressLabel) {
+        progressLabel.remove();
+    }
+
+    // 🧹 Clean up request progress tracking
+    if (form.dataset.requestId) {
+        delete progressStateMap[form.dataset.requestId];
+    }
+
     const spinner = form.querySelector('.spinner');
     if (spinner) {
         spinner.remove();
@@ -523,6 +556,8 @@ function hideLoadingSpinner(form) {
         downloadButton.style.display = 'inline-block';
     }
 }
+
+
 
 
 
@@ -879,20 +914,32 @@ function createPDFPreview(file, path) {
     return pdfThumbnail;
 }
 function updateZipProgress(requestId, progress) {
-    // console.log(`[DEBUG] Received progress update: ${progress}% for Request ID: ${requestId}`);
-
     const forms = document.querySelectorAll('form');
     let formFound = false;
 
+    // Get or initialize previous state
+    if (!progressStateMap[requestId]) {
+        progressStateMap[requestId] = { lastProgress: -1, phase: 'retrieving' };
+    }
+
+    const state = progressStateMap[requestId];
+
+    // Detect phase switch: went from 100 to 0
+    // Infer compressing phase more reliably
+    console.log(`[DEBUG] Checking phase switch: last=${state.lastProgress}, current=${progress}`);
+    if (state.phase === 'retrieving' && progress <= 1 && state.lastProgress >= 98) {
+        console.log(`[DEBUG] Phase switch detected: retrieving → compressing`);
+        state.phase = 'compressing';
+    }
+
+    state.lastProgress = progress;
+
     forms.forEach(form => {
         const formRequestId = form.dataset.requestId;
-
         if (!formRequestId) {
             console.warn(`[DEBUG] Skipping form with undefined request ID.`);
             return;
         }
-
-        // console.log(`[DEBUG] Checking form. Form Request ID: ${formRequestId}, Expected: ${requestId}`);
 
         if (formRequestId === requestId) {
             formFound = true;
@@ -909,22 +956,38 @@ function updateZipProgress(requestId, progress) {
                 form.appendChild(progressBar);
             }
 
-            // Force UI update by toggling display off and on
-            progressBar.style.display = 'none'; // Hide temporarily
-            progressBar.value = progress; // Update progress value
-            progressBar.style.display = 'block'; // Show again
+            // === Add/update label ===
+            let progressLabel = form.querySelector('.zip-progress-label');
+            if (!progressLabel) {
+                progressLabel = document.createElement('div');
+                progressLabel.classList.add('zip-progress-label');
+                progressLabel.style.fontSize = '0.9em';
+                progressLabel.style.marginTop = '4px';
+                progressLabel.style.color = '#ccc';
+                form.appendChild(progressLabel);
+            }
+
+            const label = `${capitalize(state.phase)} ${Math.round(progress)}%`;
+            progressLabel.textContent = label;
+            // =========================
+
+            progressBar.style.display = 'none';
+            progressBar.value = progress;
+            progressBar.style.display = 'block';
 
             requestAnimationFrame(() => {
-                progressBar.style.display = 'block'; // Show again
-                progressBar.offsetHeight; // Force reflow
+                progressBar.style.display = 'block';
+                progressBar.offsetHeight;
             });
 
-
-            // console.log(`[DEBUG] Updated progress bar to ${progress}% for Request ID: ${requestId}`);
-
             if (progress >= 100) {
-                console.log(`[DEBUG] Hiding spinner for Request ID: ${requestId}`);
-                hideLoadingSpinner(form);
+                if (state.phase === 'compressing') {
+                    console.log(`[DEBUG] Hiding spinner for Request ID: ${requestId} (compression done)`);
+                    hideLoadingSpinner(form);
+                } else {
+                    // retrieving just finished — leave the bar & label in place
+                    console.log(`[DEBUG] Phase “retrieving” completed for ${requestId}, now waiting for compressing…`);
+                }
             }
         }
     });
@@ -933,6 +996,12 @@ function updateZipProgress(requestId, progress) {
         console.warn(`[DEBUG] No matching form found for Request ID: ${requestId}`);
     }
 }
+
+function capitalize(str) {
+    return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+
 
 
 
